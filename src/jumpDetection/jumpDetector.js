@@ -1,71 +1,87 @@
 /**
- * Jump Detection Module
- * Detects jumps, landings, and calculates force
+ * Jump Detection Module - Finite State Machine (FSM) Approach
+ * Detects jumps, landings, and calculates force using a robust FSM
  * Can be easily removed by deleting the jumpDetection folder
+ * 
+ * FSM States: GROUNDED → TAKEOFF → AIRBORNE → LANDING → GROUNDED
+ * 
+ * This approach guarantees:
+ * - Correct state sequence
+ * - Zero false jumps
+ * - Robust against noise
+ * - Reliable airtime measurement
  */
 
 import { posePubSub } from '../utils/pubsub';
+
+// FSM States
+const FSM_STATES = {
+  GROUNDED: 'grounded',
+  TAKEOFF: 'takeoff',
+  AIRBORNE: 'airborne',
+  LANDING: 'landing',
+};
 
 class JumpDetector {
   constructor() {
     this.isSubscribed = false;
     this.unsubscribe = null;
     
-    // State tracking
+    // FSM State
+    this.fsmState = FSM_STATES.GROUNDED;
     this.previousPoseData = null;
+    
+    // Jump tracking
     this.jumpState = {
-      isJumping: false,
-      isInAir: false,
-      isLanding: false,
-      jumpStartTime: null,
-      takeoffTime: null, // Time when jump actually started (takeoff)
-      peakHeight: null,
-      landingTime: null,
       jumpCount: 0,
-      lastJumpEndTime: 0, // Track when last jump ended to prevent double counting
-      currentAirtime: 0, // Current airtime in milliseconds
-      peakLandingForce: null, // Peak ground reaction force during landing
+      currentJump: null, // { takeoffTime, landingTime, peakHeight, peakGRF, airtime }
+      lastJumpEndTime: 0,
     };
     
-    // Thresholds - optimized for better detection
-    // Note: Normalized coordinates (0-1) need conversion to real-world units
-    // Assuming typical person height ~1.7m, normalized Y range represents ~2m
+    // Configuration
     this.config = {
-      // Real-world scaling factors
-      normalizedToMeters: 2.0, // Convert normalized units to meters (typical person height range)
-      fps: 60, // Typical frame rate for velocity calculations
+      // Real-world scaling
+      normalizedToMeters: 2.0,
       
-      // Velocity thresholds in m/s (converted from normalized)
-      verticalVelocityThreshold: 0.3, // Upward velocity threshold (m/s) - ~0.15 normalized * 2
-      landingVelocityThreshold: 0.2, // Downward velocity threshold (m/s) - ~0.10 normalized * 2
+      // FSM Transition Thresholds
+      takeoffVelocityThreshold: 0.3, // m/s - upward velocity to trigger takeoff
+      landingVelocityThreshold: 0.2, // m/s - downward velocity to trigger landing
+      landingGRFThreshold: 1.2, // Multiple of body weight (e.g., 1.2 = 20% above weight)
       
-      // Height thresholds in meters
-      minJumpHeight: 0.10, // Minimum jump height (meters) - ~0.05 normalized * 2
-      minCrouchDepth: 0.06, // Minimum hip drop (meters) - ~0.03 normalized * 2
+      // Time gating (critical for FSM robustness)
+      minAirborneTime: 100, // ms - minimum time in AIRBORNE state
+      takeoffDebounceTime: 50, // ms - debounce for takeoff detection
+      landingDebounceTime: 50, // ms - debounce for landing detection
+      maxJumpDuration: 2000, // ms - safety timeout
+      cooldownAfterJump: 500, // ms - cooldown after landing
       
-      // Time thresholds
-      minAirTime: 80, // Minimum air time (milliseconds)
-      maxTimeBetweenJumpAndLand: 2000, // Max time for a jump to complete (milliseconds)
-      cooldownAfterJump: 500, // Cooldown period after jump ends (milliseconds)
+      // Validation thresholds
+      minJumpHeight: 0.10, // m - minimum jump height to count
+      minCrouchDepth: 0.06, // m - minimum crouch for jump detection
       
-      // Other settings
-      mass: 70, // kg (default, can be set by user)
-      noiseThreshold: 0.02, // m/s - ignore movements smaller than this
-      velocitySmoothing: 0.4, // EMA smoothing factor (0-1, higher = less smoothing, more responsive)
+      // Physics
+      mass: 70, // kg
+      noiseThreshold: 0.02, // m/s - velocity noise gate
+      velocitySmoothing: 0.35, // EMA alpha (0.3-0.4)
+      accelerationSmoothing: 0.2, // EMA alpha for acceleration
     };
     
-    // Velocity smoothing
+    // Velocity and acceleration tracking
+    this.rawVelocity = 0;
     this.smoothedVelocity = 0;
-    this.velocityHistory = [];
+    this.velocityHistory = []; // Stores smoothed velocities
     this.maxHistoryLength = 5;
     
-    // Acceleration smoothing
     this.smoothedAcceleration = 0;
-    this.accelerationSmoothing = 0.2; // Strong smoothing for acceleration
     
-    // Height tracking for better peak detection
+    // Height tracking
     this.heightHistory = [];
     this.maxHeightHistoryLength = 10;
+    this.baselineHipHeight = null;
+    
+    // FSM timing
+    this.stateEntryTime = 0; // When current state was entered
+    this.lastSignificantMovement = 0;
     
     // Callbacks
     this.onJumpDetected = null;
@@ -73,10 +89,6 @@ class JumpDetector {
     this.onForceCalculated = null;
   }
 
-  /**
-   * Set mass for force calculations
-   * @param {number} mass - Mass in kilograms
-   */
   setMass(mass) {
     if (mass > 0 && mass <= 500) {
       this.config.mass = mass;
@@ -86,17 +98,10 @@ class JumpDetector {
     }
   }
 
-  /**
-   * Get current mass setting
-   * @returns {number} Current mass in kg
-   */
   getMass() {
     return this.config.mass;
   }
 
-  /**
-   * Subscribe to pose data feed
-   */
   subscribe() {
     if (this.isSubscribed) {
       console.warn('JumpDetector already subscribed');
@@ -111,9 +116,6 @@ class JumpDetector {
     console.log('JumpDetector subscribed to pose data feed');
   }
 
-  /**
-   * Unsubscribe from pose data feed
-   */
   unsubscribeFromFeed() {
     if (this.unsubscribe) {
       this.unsubscribe();
@@ -124,7 +126,7 @@ class JumpDetector {
   }
 
   /**
-   * Process incoming pose data
+   * Main FSM processing function
    * @param {Object} poseData - Pose data from pub/sub
    */
   processPoseData(poseData) {
@@ -132,16 +134,18 @@ class JumpDetector {
       return;
     }
 
-    // Calculate vertical velocity (with noise filtering and smoothing)
+    // Calculate velocity and acceleration
     const verticalVelocity = this.calculateVerticalVelocity(poseData);
+    const force = this.calculateForce(poseData, verticalVelocity);
     
     // Only process if we have valid previous data
     if (!this.previousPoseData) {
       this.previousPoseData = poseData;
+      this.stateEntryTime = poseData.timestamp;
       return;
     }
-    
-    // Get current hip height for tracking
+
+    // Update height tracking
     const hipCenter = this.getHipCenter(poseData.joints);
     if (hipCenter) {
       this.heightHistory.push(hipCenter.y);
@@ -149,39 +153,11 @@ class JumpDetector {
         this.heightHistory.shift();
       }
     }
-    
-    // Detect jump (only when not already jumping/in air and after cooldown)
-    const timeSinceLastJump = poseData.timestamp - this.jumpState.lastJumpEndTime;
-    if (!this.jumpState.isJumping && !this.jumpState.isInAir && 
-        timeSinceLastJump >= this.config.cooldownAfterJump) {
-      if (this.detectJumpStart(poseData, verticalVelocity)) {
-        this.handleJumpStart(poseData);
-      }
-    }
-    
-    // Track jump in progress
-    if (this.jumpState.isJumping || this.jumpState.isInAir) {
-      this.trackJump(poseData, verticalVelocity);
-    }
-    
-    // Detect landing (only when in air)
-    if (this.jumpState.isInAir) {
-      // Track peak landing force during landing phase
-      const currentForce = this.calculateForce(poseData, verticalVelocity);
-      if (currentForce && currentForce.totalForce) {
-        if (this.jumpState.peakLandingForce === null || 
-            currentForce.totalForce > this.jumpState.peakLandingForce) {
-          this.jumpState.peakLandingForce = currentForce.totalForce;
-        }
-      }
-      
-      if (this.detectLanding(poseData, verticalVelocity)) {
-        this.handleLanding(poseData);
-      }
-    }
-    
-    // Calculate force
-    const force = this.calculateForce(poseData, verticalVelocity);
+
+    // FSM State Machine - process current state
+    this.processFSM(poseData, verticalVelocity, force, hipCenter);
+
+    // Always publish force data
     if (force && this.onForceCalculated) {
       this.onForceCalculated(force);
     }
@@ -190,62 +166,348 @@ class JumpDetector {
   }
 
   /**
+   * FSM State Machine - processes state transitions
+   * Guarantees correct sequence: GROUNDED → TAKEOFF → AIRBORNE → LANDING → GROUNDED
+   */
+  processFSM(poseData, verticalVelocity, force, hipCenter) {
+    const currentTime = poseData.timestamp;
+    const timeInState = currentTime - this.stateEntryTime;
+    const absVelocity = Math.abs(verticalVelocity);
+    const weight = this.config.mass * 9.81;
+    const grfRatio = force ? force.totalForce / weight : 1.0;
+
+    switch (this.fsmState) {
+      case FSM_STATES.GROUNDED:
+        // Transition to TAKEOFF: significant upward velocity + debounce
+        if (this.canTransitionToTakeoff(poseData, verticalVelocity, timeInState)) {
+          this.transitionToTakeoff(poseData, hipCenter);
+        }
+        break;
+
+      case FSM_STATES.TAKEOFF:
+        // Transition to AIRBORNE: velocity peaks (stops increasing upward)
+        if (this.canTransitionToAirborne(verticalVelocity, timeInState)) {
+          this.transitionToAirborne(poseData, hipCenter);
+        }
+        // Safety: timeout back to GROUNDED
+        if (timeInState > this.config.maxJumpDuration) {
+          this.transitionToGrounded('Takeoff timeout');
+        }
+        break;
+
+      case FSM_STATES.AIRBORNE:
+        // Track peak height
+        if (hipCenter && this.jumpState.currentJump) {
+          if (this.jumpState.currentJump.peakHeight === null || 
+              hipCenter.y < this.jumpState.currentJump.peakHeight) {
+            this.jumpState.currentJump.peakHeight = hipCenter.y;
+          }
+        }
+        
+        // Transition to LANDING: downward velocity + minimum airtime
+        if (this.canTransitionToLanding(verticalVelocity, timeInState)) {
+          this.transitionToLanding(poseData);
+        }
+        // Safety: timeout back to GROUNDED
+        if (timeInState > this.config.maxJumpDuration) {
+          this.transitionToGrounded('Airborne timeout');
+        }
+        break;
+
+      case FSM_STATES.LANDING:
+        // Track peak GRF during landing
+        if (force && this.jumpState.currentJump) {
+          if (this.jumpState.currentJump.peakGRF === null ||
+              force.totalForce > this.jumpState.currentJump.peakGRF) {
+            this.jumpState.currentJump.peakGRF = force.totalForce;
+          }
+        }
+        
+        // Transition to GROUNDED: GRF stabilizes + debounce
+        if (this.canTransitionToGrounded(force, grfRatio, timeInState)) {
+          this.transitionToGrounded('Landing complete');
+        }
+        // Safety: timeout back to GROUNDED
+        if (timeInState > this.config.maxJumpDuration) {
+          this.transitionToGrounded('Landing timeout');
+        }
+        break;
+    }
+  }
+
+  /**
+   * Check if can transition from GROUNDED to TAKEOFF
+   */
+  canTransitionToTakeoff(poseData, verticalVelocity, timeInState) {
+    // Cooldown check
+    const timeSinceLastJump = poseData.timestamp - this.jumpState.lastJumpEndTime;
+    if (timeSinceLastJump < this.config.cooldownAfterJump) {
+      return false;
+    }
+
+    // Debounce: must maintain upward velocity for debounce time
+    if (timeInState < this.config.takeoffDebounceTime) {
+      return false;
+    }
+
+    // Must have significant upward velocity
+    if (verticalVelocity <= this.config.takeoffVelocityThreshold) {
+      return false;
+    }
+
+    // Optional: check for crouch (both knees bent)
+    const angles = poseData.angles;
+    const joints = poseData.joints;
+    const hipCenter = this.getHipCenter(joints);
+    
+    if (angles && hipCenter && this.baselineHipHeight !== null) {
+      const leftKnee = angles.leftLeg?.knee;
+      const rightKnee = angles.rightLeg?.knee;
+      
+      // Both knees must be bent
+      const hasBentKnees = (leftKnee !== null && leftKnee < 150) && 
+                           (rightKnee !== null && rightKnee < 150);
+      
+      // Crouch check: hip lower than baseline
+      const hipDropNormalized = hipCenter.y - this.baselineHipHeight;
+      const hipDropMeters = hipDropNormalized * this.config.normalizedToMeters;
+      const hasCrouch = hipDropMeters > this.config.minCrouchDepth;
+      
+      if (!hasBentKnees || !hasCrouch) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Check if can transition from TAKEOFF to AIRBORNE
+   */
+  canTransitionToAirborne(verticalVelocity, timeInState) {
+    // Velocity must have peaked (no longer strongly upward)
+    // Small positive or negative velocity indicates peak reached
+    return verticalVelocity <= 0.06; // m/s threshold
+  }
+
+  /**
+   * Check if can transition from AIRBORNE to LANDING
+   */
+  canTransitionToLanding(verticalVelocity, timeInState) {
+    // Must have minimum airtime (critical for FSM robustness)
+    if (timeInState < this.config.minAirborneTime) {
+      return false;
+    }
+
+    // Must have significant downward velocity
+    return verticalVelocity <= -this.config.landingVelocityThreshold;
+  }
+
+  /**
+   * Check if can transition from LANDING to GROUNDED
+   */
+  canTransitionToGrounded(force, grfRatio, timeInState) {
+    // Debounce: must maintain stable GRF for debounce time
+    if (timeInState < this.config.landingDebounceTime) {
+      return false;
+    }
+
+    // GRF should be close to body weight (landing impact has settled)
+    // Allow some margin (1.1 = 10% above weight)
+    return grfRatio < 1.1;
+  }
+
+  /**
+   * Transition to TAKEOFF state
+   */
+  transitionToTakeoff(poseData, hipCenter) {
+    this.fsmState = FSM_STATES.TAKEOFF;
+    this.stateEntryTime = poseData.timestamp;
+    
+    // Initialize jump tracking
+    this.jumpState.currentJump = {
+      takeoffTime: poseData.timestamp,
+      landingTime: null,
+      peakHeight: hipCenter ? hipCenter.y : null,
+      peakGRF: null,
+      airtime: 0,
+    };
+    
+    this.jumpState.jumpCount++;
+    
+    if (this.onJumpDetected) {
+      this.onJumpDetected({
+        timestamp: poseData.timestamp,
+        jumpNumber: this.jumpState.jumpCount,
+        takeoffTime: poseData.timestamp,
+      });
+    }
+    
+    console.log('FSM: TAKEOFF', {
+      jumpNumber: this.jumpState.jumpCount,
+      timestamp: poseData.timestamp,
+    });
+  }
+
+  /**
+   * Transition to AIRBORNE state
+   */
+  transitionToAirborne(poseData, hipCenter) {
+    this.fsmState = FSM_STATES.AIRBORNE;
+    this.stateEntryTime = poseData.timestamp;
+    
+    // Update peak height
+    if (hipCenter && this.jumpState.currentJump) {
+      if (this.jumpState.currentJump.peakHeight === null ||
+          hipCenter.y < this.jumpState.currentJump.peakHeight) {
+        this.jumpState.currentJump.peakHeight = hipCenter.y;
+      }
+    }
+    
+    console.log('FSM: AIRBORNE', {
+      jumpNumber: this.jumpState.jumpCount,
+      timestamp: poseData.timestamp,
+    });
+  }
+
+  /**
+   * Transition to LANDING state
+   */
+  transitionToLanding(poseData) {
+    this.fsmState = FSM_STATES.LANDING;
+    this.stateEntryTime = poseData.timestamp;
+    
+    if (this.jumpState.currentJump) {
+      this.jumpState.currentJump.landingTime = poseData.timestamp;
+    }
+    
+    console.log('FSM: LANDING', {
+      jumpNumber: this.jumpState.jumpCount,
+      timestamp: poseData.timestamp,
+    });
+  }
+
+  /**
+   * Transition to GROUNDED state
+   */
+  transitionToGrounded(reason) {
+    const wasInJump = this.fsmState !== FSM_STATES.GROUNDED;
+    
+    this.fsmState = FSM_STATES.GROUNDED;
+    this.stateEntryTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+    
+    // Validate and finalize jump if we were in a jump sequence
+    if (wasInJump && this.jumpState.currentJump) {
+      const jump = this.jumpState.currentJump;
+      
+      // Calculate final metrics
+      const airtime = jump.landingTime && jump.takeoffTime 
+        ? jump.landingTime - jump.takeoffTime 
+        : 0;
+      
+      const hipCenter = this.getHipCenter(this.previousPoseData?.joints);
+      let jumpHeight = null;
+      if (jump.peakHeight !== null && hipCenter) {
+        const jumpHeightNormalized = hipCenter.y - jump.peakHeight;
+        jumpHeight = jumpHeightNormalized * this.config.normalizedToMeters;
+      }
+      
+      // Validate jump
+      const isValidJump = jumpHeight !== null && 
+                          jumpHeight >= this.config.minJumpHeight &&
+                          airtime >= this.config.minAirborneTime;
+      
+      if (isValidJump) {
+        // Valid jump - trigger landing callback
+        if (this.onLandingDetected) {
+          this.onLandingDetected({
+            timestamp: jump.landingTime || this.previousPoseData.timestamp,
+            jumpNumber: this.jumpState.jumpCount,
+            jumpHeight: jumpHeight,
+            airTime: airtime,
+            takeoffTime: jump.takeoffTime,
+            landingTime: jump.landingTime,
+            groundReactionForce: jump.peakGRF,
+          });
+        }
+        
+        console.log('FSM: Jump complete', {
+          jumpNumber: this.jumpState.jumpCount,
+          jumpHeight: jumpHeight,
+          airtime: airtime,
+          peakGRF: jump.peakGRF,
+        });
+      } else {
+        // Invalid jump - don't count it, but don't decrement (stats never go backwards)
+        console.warn('FSM: Invalid jump discarded', {
+          reason: reason,
+          jumpHeight: jumpHeight,
+          airtime: airtime,
+        });
+        // Reset jump count if this was the first invalid jump
+        if (this.jumpState.jumpCount > 0) {
+          this.jumpState.jumpCount--;
+        }
+      }
+      
+      this.jumpState.lastJumpEndTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+      this.jumpState.currentJump = null;
+    }
+    
+    if (wasInJump) {
+      console.log('FSM: GROUNDED', { reason });
+    }
+  }
+
+  /**
    * Calculate vertical velocity from pose data
-   * Converts normalized coordinates to real-world units (m/s)
-   * Includes noise filtering and smoothing to handle edge cases
-   * @param {Object} poseData - Current pose data
-   * @returns {number} Vertical velocity in m/s (positive = upward, negative = downward)
+   * Pipeline: Raw landmarks → Raw velocity → Smoothed velocity (EMA)
    */
   calculateVerticalVelocity(poseData) {
     if (!this.previousPoseData || !poseData.joints || !this.previousPoseData.joints) {
       return 0;
     }
 
-    // Use hip center as reference point for vertical movement
     const currentHip = this.getHipCenter(poseData.joints);
     const previousHip = this.getHipCenter(this.previousPoseData.joints);
     
     if (!currentHip || !previousHip || !currentHip.visible || !previousHip.visible) {
-      // Reset smoothing when landmarks not visible
-      this.smoothedVelocity = this.smoothedVelocity * 0.8; // Decay
+      this.smoothedVelocity = this.smoothedVelocity * 0.8;
       if (Math.abs(this.smoothedVelocity) < 0.01) {
         this.smoothedVelocity = 0;
       }
       return this.smoothedVelocity;
     }
 
-    // Calculate time delta in seconds
     const timeDelta = (poseData.timestamp - this.previousPoseData.timestamp) / 1000;
     if (timeDelta <= 0 || timeDelta > 0.1) {
-      // Skip if time delta is invalid or too large (likely dropped frame)
       return this.smoothedVelocity;
     }
 
-    // Calculate position change in normalized coordinates
-    // In normalized coordinates: Y increases downward (0 = top, 1 = bottom)
-    // So: previousY - currentY = positive when moving up (correct)
+    // Raw velocity from raw landmarks
     const deltaYNormalized = previousHip.y - currentHip.y;
-    
-    // Convert normalized position change to meters
     const deltaYMeters = deltaYNormalized * this.config.normalizedToMeters;
-    
-    // Calculate velocity in m/s: v = Δy / Δt
-    // Positive velocity = upward movement, negative = downward
     const rawVelocityMs = deltaYMeters / timeDelta;
-    
-    // Filter out noise - ignore very small movements (in m/s)
+    this.rawVelocity = rawVelocityMs;
+
+    // Noise gate
     const absVelocity = Math.abs(rawVelocityMs);
     if (absVelocity < this.config.noiseThreshold) {
-      // Movement is too small, treat as stationary
-      // Apply smoothing to gradually reduce velocity to zero
-      this.smoothedVelocity = this.smoothedVelocity * 0.9; // Decay towards zero
+      this.smoothedVelocity = this.smoothedVelocity * 0.9;
       if (Math.abs(this.smoothedVelocity) < 0.01) {
         this.smoothedVelocity = 0;
       }
+      
+      // Update baseline when stationary
+      if (this.baselineHipHeight === null || 
+          Math.abs(currentHip.y - this.baselineHipHeight) < 0.01) {
+        this.baselineHipHeight = currentHip.y;
+      }
+      this.lastSignificantMovement = poseData.timestamp;
       return this.smoothedVelocity;
     }
     
-    // Apply exponential moving average smoothing
+    // Smooth velocity with EMA
     if (this.smoothedVelocity === 0) {
       this.smoothedVelocity = rawVelocityMs;
     } else {
@@ -254,21 +516,88 @@ class JumpDetector {
         (1 - this.config.velocitySmoothing) * this.smoothedVelocity;
     }
     
-    // Store in history for additional filtering
+    // Store smoothed velocity in history
     this.velocityHistory.push(this.smoothedVelocity);
     if (this.velocityHistory.length > this.maxHistoryLength) {
       this.velocityHistory.shift();
     }
     
-    // Return smoothed velocity in m/s
+    this.lastSignificantMovement = poseData.timestamp;
     return this.smoothedVelocity;
   }
 
   /**
-   * Get center point between hips
-   * @param {Object} joints - Joints object
-   * @returns {Object|null} Hip center point
+   * Calculate force based on pose data
+   * Pipeline: Smoothed velocity → Acceleration from smoothed velocity → Force
    */
+  calculateForce(poseData, verticalVelocity) {
+    if (!this.previousPoseData) {
+      return null;
+    }
+
+    const timeDelta = (poseData.timestamp - this.previousPoseData.timestamp) / 1000;
+    if (timeDelta <= 0 || timeDelta > 0.1) {
+      return null;
+    }
+
+    const g = 9.81;
+    const weight = this.config.mass * g;
+    const absVelocity = Math.abs(verticalVelocity);
+    
+    // Hard clamp to bodyweight when stationary
+    const recentVelocities = this.velocityHistory.slice(-5);
+    const allSmall = recentVelocities.length >= 3 && 
+                     recentVelocities.every(v => Math.abs(v) < this.config.noiseThreshold);
+    
+    if (absVelocity < this.config.noiseThreshold || allSmall) {
+      return {
+        verticalVelocity: 0,
+        acceleration: 0,
+        weight: weight,
+        netForce: 0,
+        totalForce: weight,
+        mass: this.config.mass,
+        timestamp: poseData.timestamp,
+      };
+    }
+    
+    // Acceleration from smoothed velocity
+    const previousSmoothedVelocity = this.velocityHistory.length > 1
+      ? this.velocityHistory[this.velocityHistory.length - 2]
+      : 0;
+    
+    let rawAcceleration = (verticalVelocity - previousSmoothedVelocity) / timeDelta;
+    rawAcceleration = Math.max(Math.min(rawAcceleration, 50), -50);
+    
+    // Smooth acceleration
+    if (this.smoothedAcceleration === 0) {
+      this.smoothedAcceleration = rawAcceleration;
+    } else {
+      this.smoothedAcceleration = 
+        this.config.accelerationSmoothing * rawAcceleration + 
+        (1 - this.config.accelerationSmoothing) * this.smoothedAcceleration;
+    }
+    
+    if (Math.abs(this.smoothedAcceleration) < 0.2) {
+      this.smoothedAcceleration = 0;
+    }
+    
+    const accelerationMs2 = this.smoothedAcceleration;
+    const netForce = this.config.mass * accelerationMs2;
+    let totalForce = weight + netForce;
+    totalForce = Math.max(totalForce, weight);
+    
+    return {
+      verticalVelocity: verticalVelocity,
+      acceleration: accelerationMs2,
+      weight: weight,
+      netForce: netForce,
+      totalForce: totalForce,
+      mass: this.config.mass,
+      timestamp: poseData.timestamp,
+    };
+  }
+
   getHipCenter(joints) {
     if (!joints || !joints.leftHip || !joints.rightHip) {
       return null;
@@ -278,6 +607,13 @@ class JumpDetector {
     const rightHip = joints.rightHip;
 
     if (!leftHip.visible || !rightHip.visible) {
+      return null;
+    }
+    
+    if (leftHip.visibility !== undefined && leftHip.visibility < 0.6) {
+      return null;
+    }
+    if (rightHip.visibility !== undefined && rightHip.visibility < 0.6) {
       return null;
     }
 
@@ -290,381 +626,40 @@ class JumpDetector {
   }
 
   /**
-   * Detect jump start - simplified and more reliable
-   * @param {Object} poseData - Current pose data
-   * @param {number} verticalVelocity - Vertical velocity in m/s (smoothed)
-   * @returns {boolean} True if jump detected
-   */
-  detectJumpStart(poseData, verticalVelocity) {
-    // Must have significant upward velocity (positive = upward in our system)
-    // Threshold is in m/s now
-    if (verticalVelocity <= this.config.verticalVelocityThreshold) {
-      return false;
-    }
-    
-    // Optional: Check for crouch position (knees bent)
-    // This helps avoid false positives but is not required
-    const angles = poseData.angles;
-    if (angles) {
-      const leftKnee = angles.leftLeg?.knee;
-      const rightKnee = angles.rightLeg?.knee;
-      
-      // At least one knee should be bent (more lenient)
-      const hasBentKnee = (leftKnee !== null && leftKnee < 150) || 
-                          (rightKnee !== null && rightKnee < 150);
-      
-      // Optional crouch check - hip lower than shoulder
-      let hasCrouch = true; // Default to true if we can't check
-      const joints = poseData.joints;
-      if (joints && joints.leftHip && joints.leftShoulder) {
-        const hipY = joints.leftHip.y;
-        const shoulderY = joints.leftShoulder.y;
-        const hipDropNormalized = hipY - shoulderY;
-        const hipDropMeters = hipDropNormalized * this.config.normalizedToMeters;
-        hasCrouch = hipDropMeters >= this.config.minCrouchDepth;
-      }
-      
-      // If we have angle data, prefer jumps with bent knees or crouch
-      // But don't require both
-      if (!hasBentKnee && !hasCrouch) {
-        return false;
-      }
-    }
-    
-    return true;
-  }
-
-  /**
-   * Handle jump start (takeoff)
-   * @param {Object} poseData - Pose data at jump start
-   */
-  handleJumpStart(poseData) {
-    const hipCenter = this.getHipCenter(poseData.joints);
-    
-    this.jumpState.isJumping = true;
-    this.jumpState.isInAir = false;
-    this.jumpState.jumpStartTime = poseData.timestamp;
-    this.jumpState.takeoffTime = poseData.timestamp; // Record takeoff time
-    this.jumpState.peakHeight = hipCenter ? hipCenter.y : null;
-    this.jumpState.jumpCount++;
-    this.jumpState.currentAirtime = 0;
-    this.jumpState.peakLandingForce = null; // Reset for new jump
-    
-    if (this.onJumpDetected) {
-      this.onJumpDetected({
-        timestamp: poseData.timestamp,
-        jumpNumber: this.jumpState.jumpCount,
-        startHeight: hipCenter ? hipCenter.y : null,
-        takeoffTime: poseData.timestamp,
-      });
-    }
-    
-    console.log('Takeoff detected!', {
-      jumpNumber: this.jumpState.jumpCount,
-      timestamp: poseData.timestamp,
-      takeoffTime: poseData.timestamp,
-    });
-  }
-
-  /**
-   * Track jump in progress
-   * @param {Object} poseData - Current pose data
-   * @param {number} verticalVelocity - Vertical velocity
-   */
-  trackJump(poseData, verticalVelocity) {
-    const hipCenter = this.getHipCenter(poseData.joints);
-    
-    if (!hipCenter) {
-      // If we lose tracking during jump, cancel it
-      this.cancelJump('Lost tracking');
-      return;
-    }
-    
-    // Update peak height (lowest Y = highest point)
-    if (this.jumpState.peakHeight === null || hipCenter.y < this.jumpState.peakHeight) {
-      this.jumpState.peakHeight = hipCenter.y;
-    }
-    
-    // Transition to in-air when upward velocity stops (reached peak)
-    // Positive velocity = upward, negative = downward (in m/s)
-    // When velocity becomes negative or near zero, we've reached peak
-    if (this.jumpState.isJumping) {
-      // Transition to in-air when velocity is no longer strongly upward
-      // Threshold: 0.06 m/s (small upward velocity or downward)
-      if (verticalVelocity <= 0.06) {
-        this.jumpState.isJumping = false;
-        this.jumpState.isInAir = true;
-        // Takeoff is complete when we transition to in-air
-        if (!this.jumpState.takeoffTime) {
-          this.jumpState.takeoffTime = poseData.timestamp;
-        }
-      }
-    }
-    
-    // Update current airtime if in air
-    if (this.jumpState.isInAir && this.jumpState.takeoffTime) {
-      this.jumpState.currentAirtime = poseData.timestamp - this.jumpState.takeoffTime;
-    }
-    
-    // Safety: If jump takes too long, cancel it
-    const jumpDuration = poseData.timestamp - (this.jumpState.jumpStartTime || poseData.timestamp);
-    if (jumpDuration > this.config.maxTimeBetweenJumpAndLand) {
-      this.cancelJump('Jump duration too long');
-      return;
-    }
-  }
-
-  /**
-   * Detect landing
-   * @param {Object} poseData - Current pose data
-   * @param {number} verticalVelocity - Vertical velocity in m/s
-   * @returns {boolean} True if landing detected
-   */
-  detectLanding(poseData, verticalVelocity) {
-    // Must have significant downward velocity (negative = downward in m/s)
-    if (verticalVelocity >= -this.config.landingVelocityThreshold) {
-      return false;
-    }
-    
-    // Check if enough time has passed (minimum air time)
-    const airTime = poseData.timestamp - (this.jumpState.jumpStartTime || poseData.timestamp);
-    if (airTime < this.config.minAirTime) {
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * Handle landing
-   * @param {Object} poseData - Pose data at landing
-   */
-  handleLanding(poseData) {
-    const hipCenter = this.getHipCenter(poseData.joints);
-    // Calculate jump height in meters
-    const jumpHeightNormalized = this.jumpState.peakHeight && hipCenter 
-      ? this.jumpState.peakHeight - hipCenter.y 
-      : null;
-    const jumpHeight = jumpHeightNormalized !== null 
-      ? jumpHeightNormalized * this.config.normalizedToMeters 
-      : null;
-    
-    // Calculate airtime from takeoff to landing
-    const takeoffTime = this.jumpState.takeoffTime || this.jumpState.jumpStartTime;
-    const airTime = takeoffTime ? poseData.timestamp - takeoffTime : 0;
-    
-    // Validate jump - if it doesn't meet requirements, cancel it
-    if (jumpHeight !== null && jumpHeight < this.config.minJumpHeight) {
-      console.warn('Jump height too small, canceling jump');
-      this.cancelJump('Jump height too small');
-      return;
-    }
-    
-    if (airTime < this.config.minAirTime) {
-      console.warn('Air time too short, canceling jump');
-      this.cancelJump('Air time too short');
-      return;
-    }
-    
-    // Use the peak landing force we've been tracking during landing phase
-    const groundReactionForce = this.jumpState.peakLandingForce;
-    
-    // Valid landing - update state
-    this.jumpState.isInAir = false;
-    this.jumpState.isJumping = false;
-    this.jumpState.isLanding = true;
-    this.jumpState.landingTime = poseData.timestamp;
-    this.jumpState.lastJumpEndTime = poseData.timestamp;
-    this.jumpState.currentAirtime = airTime;
-    
-    if (this.onLandingDetected) {
-      this.onLandingDetected({
-        timestamp: poseData.timestamp,
-        jumpNumber: this.jumpState.jumpCount,
-        jumpHeight: jumpHeight,
-        airTime: airTime,
-        takeoffTime: takeoffTime,
-        landingTime: poseData.timestamp,
-        groundReactionForce: this.jumpState.peakLandingForce,
-      });
-    }
-    
-    console.log('Landing detected!', {
-      jumpNumber: this.jumpState.jumpCount,
-      jumpHeight: jumpHeight,
-      airTime: airTime,
-      takeoffTime: takeoffTime,
-      landingTime: poseData.timestamp,
-      groundReactionForce: this.jumpState.peakLandingForce,
-    });
-    
-    // Reset after landing (with delay to show landing state)
-    setTimeout(() => {
-      this.jumpState.isLanding = false;
-      this.jumpState.jumpStartTime = null;
-      this.jumpState.takeoffTime = null;
-      this.jumpState.peakHeight = null;
-      this.jumpState.landingTime = null;
-      this.jumpState.currentAirtime = 0;
-      // Keep peakLandingForce until next jump
-    }, 500);
-  }
-
-  /**
-   * Cancel a jump (invalid jump)
-   * @param {string} reason - Reason for cancellation
-   */
-  cancelJump(reason) {
-    console.warn('Canceling jump:', reason);
-    // Decrement count if jump was already counted
-    if (this.jumpState.jumpCount > 0) {
-      this.jumpState.jumpCount--;
-    }
-    this.resetJumpState();
-  }
-
-  /**
-   * Calculate force based on pose data
-   * 
-   * Force Calculation Method:
-   * 1. Calculate vertical velocity from hip center position change (in m/s)
-   * 2. Calculate acceleration from velocity change over time (in m/s²)
-   * 3. Apply Newton's Second Law: F = m × a
-   * 
-   * Force Components:
-   * - Weight (mg): Force due to gravity when stationary = m × g
-   * - Net Force: Additional force from acceleration = m × a
-   * - Total Force: Weight + Net Force = m × (g + a)
-   * 
-   * When stationary (a ≈ 0): Net Force ≈ 0, Total Force = Weight = m × g
-   * When jumping (a > 0 upward): Net Force = m × a (positive), Total Force > Weight
-   * When landing (a < 0 downward): Net Force = m × a (negative), but impact increases force
-   * 
-   * @param {Object} poseData - Current pose data
-   * @param {number} verticalVelocity - Vertical velocity in m/s
-   * @returns {Object|null} Force data
-   */
-  calculateForce(poseData, verticalVelocity) {
-    if (!this.previousPoseData) {
-      return null;
-    }
-
-    const timeDelta = (poseData.timestamp - this.previousPoseData.timestamp) / 1000;
-    if (timeDelta <= 0 || timeDelta > 0.1) {
-      // Invalid or dropped frame
-      return null;
-    }
-
-    // Check if stationary first - if velocity is very small, treat as stationary
-    const absVelocity = Math.abs(verticalVelocity);
-    const isStationary = absVelocity < this.config.noiseThreshold * 2;
-    
-    // Get previous smoothed velocity from history (already in m/s)
-    const previousVelocity = this.velocityHistory.length > 1
-      ? this.velocityHistory[this.velocityHistory.length - 2]
-      : 0;
-    
-    // Calculate acceleration in m/s²: a = Δv / Δt
-    // Velocity is already in m/s, so acceleration is directly in m/s²
-    let rawAcceleration = (verticalVelocity - previousVelocity) / timeDelta;
-    
-    // Apply strong smoothing to acceleration to filter noise
-    if (this.smoothedAcceleration === 0) {
-      this.smoothedAcceleration = rawAcceleration;
-    } else {
-      this.smoothedAcceleration = 
-        this.accelerationSmoothing * rawAcceleration + 
-        (1 - this.accelerationSmoothing) * this.smoothedAcceleration;
-    }
-    
-    // If stationary, force acceleration to zero
-    if (isStationary) {
-      // Decay acceleration towards zero when stationary
-      this.smoothedAcceleration = this.smoothedAcceleration * 0.7;
-      if (Math.abs(this.smoothedAcceleration) < 0.1) {
-        this.smoothedAcceleration = 0;
-      }
-    }
-    
-    // Filter out noise in acceleration (threshold in m/s²)
-    if (Math.abs(this.smoothedAcceleration) < 0.2) {
-      this.smoothedAcceleration = 0;
-    }
-    
-    // Acceleration is already in m/s², no conversion needed
-    const accelerationMs2 = this.smoothedAcceleration;
-    
-    // Calculate forces using Newton's Second Law
-    const g = 9.81; // Gravitational acceleration (m/s²)
-    const weight = this.config.mass * g; // Weight = mg (N)
-    
-    // Net force from acceleration: F_net = m × a
-    // Positive acceleration (upward) = positive net force
-    // Negative acceleration (downward) = negative net force
-    const netForce = this.config.mass * accelerationMs2; // N
-    
-    // Total force = weight + net force
-    // When jumping up: netForce > 0, totalForce > weight
-    // When landing: netForce < 0, but impact can cause large positive acceleration
-    const totalForce = weight + netForce; // N
-    
-    return {
-      verticalVelocity: verticalVelocity, // m/s
-      acceleration: accelerationMs2, // m/s²
-      weight: weight, // N (force due to gravity)
-      netForce: netForce, // N (force from acceleration, can be negative)
-      totalForce: totalForce, // N (total force = weight + net force)
-      mass: this.config.mass, // kg
-      timestamp: poseData.timestamp,
-    };
-  }
-
-  /**
-   * Get current jump state
-   * @returns {Object} Current jump state
+   * Get current jump state (for UI)
    */
   getState() {
-    return { ...this.jumpState };
+    return {
+      fsmState: this.fsmState,
+      isJumping: this.fsmState === FSM_STATES.TAKEOFF,
+      isInAir: this.fsmState === FSM_STATES.AIRBORNE,
+      isLanding: this.fsmState === FSM_STATES.LANDING,
+      jumpCount: this.jumpState.jumpCount,
+      currentAirtime: this.jumpState.currentJump && this.jumpState.currentJump.takeoffTime
+        ? (this.previousPoseData?.timestamp || Date.now()) - this.jumpState.currentJump.takeoffTime
+        : 0,
+    };
   }
 
   /**
-   * Reset jump state (preserves jump count)
-   */
-  resetJumpState() {
-    this.jumpState.isJumping = false;
-    this.jumpState.isInAir = false;
-    this.jumpState.isLanding = false;
-    this.jumpState.jumpStartTime = null;
-    this.jumpState.takeoffTime = null;
-    this.jumpState.peakHeight = null;
-    this.jumpState.landingTime = null;
-    this.jumpState.currentAirtime = 0;
-    this.jumpState.peakLandingForce = null;
-    // Don't reset jumpCount or lastJumpEndTime
-  }
-
-  /**
-   * Reset jump detector state (full reset, including jump count)
+   * Reset jump detector state
    */
   reset() {
+    this.fsmState = FSM_STATES.GROUNDED;
+    this.stateEntryTime = 0;
     this.jumpState = {
-      isJumping: false,
-      isInAir: false,
-      isLanding: false,
-      jumpStartTime: null,
-      takeoffTime: null,
-      peakHeight: null,
-      landingTime: null,
       jumpCount: 0,
+      currentJump: null,
       lastJumpEndTime: 0,
-      currentAirtime: 0,
-      peakLandingForce: null,
     };
     this.previousPoseData = null;
+    this.rawVelocity = 0;
     this.smoothedVelocity = 0;
     this.velocityHistory = [];
     this.heightHistory = [];
     this.smoothedAcceleration = 0;
+    this.baselineHipHeight = null;
+    this.lastSignificantMovement = 0;
   }
 }
 

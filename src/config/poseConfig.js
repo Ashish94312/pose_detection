@@ -1,17 +1,17 @@
 // MediaPipe BlazePose GHUM Configuration
 export const POSE_CONFIG = {
   // Using lite model for better performance (60+ FPS target)
-  modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  // modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
   // Heavy model (slower, more accurate) - uncomment if needed
-  // modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
+  modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
   wasmPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm',
   delegate: 'GPU', // WebGPU
   runningMode: 'VIDEO',
   numPoses: 1,
   // Increased confidence thresholds to reduce jitter
-  minPoseDetectionConfidence: 0.7,
-  minPosePresenceConfidence: 0.7,
-  minTrackingConfidence: 0.7,
+  minPoseDetectionConfidence: 0.75,
+  minPosePresenceConfidence: 0.75,
+  minTrackingConfidence: 0.75,
 };
 
 export const VIDEO_CONFIG = {
