@@ -1,0 +1,41 @@
+.angle-display {
+  margin-top: 20px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.angle-section {
+  margin-bottom: 20px;
+}
+
+.angle-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px 0;
+  color: #333;
+}
+
+.angle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+
+.angle-group {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px;
+  background-color: #f5f5f5;
+  border-radius: 4px;
+}
+
+.angle-label {
+  color: #666;
+}
+
+.angle-value {
+  font-weight: 600;
+  color: #333;
+}
+

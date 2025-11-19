@@ -1,0 +1,29 @@
+.status-container {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.status-label {
+  color: #666;
+}
+
+.status-success {
+  color: #28a745;
+}
+
+.status-loading {
+  color: #ffc107;
+}
+
+.fps-value {
+  color: #333;
+  font-weight: 600;
+}

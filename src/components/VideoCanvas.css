@@ -1,0 +1,16 @@
+.video-container {
+  margin: 20px 0;
+}
+
+.video-element {
+  display: none;
+}
+
+.canvas-element {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  display: block;
+  border: 1px solid #ddd;
+  background-color: #000;
+}

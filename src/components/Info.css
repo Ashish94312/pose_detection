@@ -1,0 +1,10 @@
+.info {
+  margin-top: 20px;
+  font-size: 12px;
+  color: #999;
+  text-align: center;
+}
+
+.info p {
+  margin: 4px 0;
+}

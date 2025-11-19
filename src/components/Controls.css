@@ -1,0 +1,25 @@
+.controls {
+  display: flex;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.control-button {
+  padding: 10px 20px;
+  font-size: 14px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+  background-color: #fff;
+  color: #333;
+}
+
+.control-button:hover:not(:disabled) {
+  background-color: #f5f5f5;
+}
+
+.control-button:disabled {
+  background-color: #f5f5f5;
+  color: #999;
+  cursor: not-allowed;
+}

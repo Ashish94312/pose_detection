@@ -1,0 +1,157 @@
+.jump-widgets {
+  margin-top: 20px;
+  padding: 16px;
+  background-color: #f9f9f9;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.jump-widgets-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.jump-widgets h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+.mass-toggle-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: #fff;
+  cursor: pointer;
+  color: #666;
+}
+
+.mass-toggle-btn:hover {
+  background-color: #f5f5f5;
+}
+
+.mass-input-container {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.mass-input-container label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #333;
+  margin-bottom: 4px;
+}
+
+.mass-input {
+  width: 80px;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.mass-input-container small {
+  display: block;
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.widget-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.widget {
+  background-color: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.widget-title {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.widget-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.widget-subtitle {
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.status-widget .status-indicator {
+  padding: 8px 12px;
+  border-radius: 4px;
+  color: white;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.widget-stats {
+  font-size: 12px;
+  color: #666;
+  line-height: 1.6;
+}
+
+.widget-stats div {
+  margin: 4px 0;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 6px 0;
+  padding: 4px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.stat-row:last-child {
+  border-bottom: none;
+}
+
+.stat-label {
+  font-weight: 500;
+  color: #666;
+  font-size: 11px;
+}
+
+.stat-value {
+  font-weight: 600;
+  color: #333;
+  font-size: 12px;
+}
+
+.widget-subtitle div {
+  margin: 2px 0;
+}
+
+.force-label {
+  font-weight: 600;
+  color: #666;
+  margin-bottom: 4px;
+}
+
