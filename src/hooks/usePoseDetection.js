@@ -1,12 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { POSE_CONFIG, SMOOTHING_CONFIG } from '../config/poseConfig';
+import { POSE_CONFIG, SMOOTHING_CONFIG, PERFORMANCE_CONFIG } from '../config/poseConfig';
 import { drawPose } from '../utils/poseDrawing';
 import { calculateAllAngles, calculateAllOrientations } from '../utils/poseAngles';
 import { AngleSmoother, LandmarkSmoother } from '../utils/smoothing';
 import { createPoseData } from '../utils/poseSchema';
 import { posePubSub } from '../utils/pubsub';
-import { saveSample } from '../utils/sampleExporter';
 
 /**
  * Custom hook for MediaPipe BlazePose GHUM pose detection
@@ -27,17 +26,34 @@ export const usePoseDetection = () => {
   const lastVideoTimeRef = useRef(-1);
   const isRunningRef = useRef(false);
   const angleSmootherRef = useRef(null);
+  const orientationSmootherRef = useRef(null);
   const landmarkSmootherRef = useRef(null);
+  const frameSkipCounterRef = useRef(0);
+  const lastLandmarksRef = useRef(null);
+  const lastAnglesRef = useRef(null);
+  const lastOrientationsRef = useRef(null);
   
   // Initialize smoothers
   useEffect(() => {
     if (SMOOTHING_CONFIG.enabled) {
       angleSmootherRef.current = new AngleSmoother(
         SMOOTHING_CONFIG.method,
-        SMOOTHING_CONFIG.alpha
+        SMOOTHING_CONFIG.alpha,
+        SMOOTHING_CONFIG.kalmanAngleProcessNoise || SMOOTHING_CONFIG.kalmanProcessNoise || 0.001,
+        SMOOTHING_CONFIG.kalmanAngleMeasurementNoise || SMOOTHING_CONFIG.kalmanMeasurementNoise || 0.25
+      );
+      // Also smooth orientations to reduce fluctuations
+      orientationSmootherRef.current = new AngleSmoother(
+        SMOOTHING_CONFIG.method,
+        SMOOTHING_CONFIG.alpha,
+        SMOOTHING_CONFIG.kalmanAngleProcessNoise || SMOOTHING_CONFIG.kalmanProcessNoise || 0.001,
+        SMOOTHING_CONFIG.kalmanAngleMeasurementNoise || SMOOTHING_CONFIG.kalmanMeasurementNoise || 0.25
       );
       landmarkSmootherRef.current = new LandmarkSmoother(
-        SMOOTHING_CONFIG.landmarkSmoothing
+        SMOOTHING_CONFIG.landmarkSmoothing,
+        SMOOTHING_CONFIG.method === 'kalman', // Use Kalman for landmarks if method is kalman
+        SMOOTHING_CONFIG.kalmanProcessNoise || 0.001,
+        SMOOTHING_CONFIG.kalmanMeasurementNoise || 0.25
       );
     }
   }, []);
@@ -74,11 +90,6 @@ export const usePoseDetection = () => {
         }
       } catch (err) {
         console.error('Error initializing pose landmarker:', err);
-        console.error('Error details:', {
-          message: err.message,
-          stack: err.stack,
-          name: err.name
-        });
         if (isMounted) {
           setError(`Failed to load model: ${err.message || 'Unknown error'}. Make sure WebGPU is supported in your browser.`);
           setIsModelLoaded(false);
@@ -108,6 +119,7 @@ export const usePoseDetection = () => {
     if (deltaTime >= 1000) {
       const currentFps = Math.round((frameCountRef.current * 1000) / deltaTime);
       setFps(currentFps);
+      
       frameCountRef.current = 0;
       lastTimeRef.current = currentTime;
     }
@@ -123,55 +135,95 @@ export const usePoseDetection = () => {
     if (videoTime !== lastVideoTimeRef.current) {
       lastVideoTimeRef.current = videoTime;
       
-      // Run pose detection
-      const result = poseLandmarkerRef.current.detectForVideo(video, performance.now());
+      const detectionInterval = PERFORMANCE_CONFIG.poseDetectionInterval;
+      const shouldRunDetection = frameSkipCounterRef.current % detectionInterval === 0;
+      
+      frameSkipCounterRef.current++;
+      
+      let rawLandmarks = null;
+      
+      if (shouldRunDetection) {
+        // Run pose detection
+        const result = poseLandmarkerRef.current.detectForVideo(video, performance.now());
 
-      if (result.landmarks && result.landmarks.length > 0) {
-        let landmarks = result.landmarks[0];
-        
-        // Apply landmark smoothing if enabled
-        if (SMOOTHING_CONFIG.enabled && landmarkSmootherRef.current) {
-          landmarks = landmarkSmootherRef.current.smooth(landmarks);
+        if (result.landmarks && result.landmarks.length > 0) {
+          rawLandmarks = result.landmarks[0];
+          // Cache raw landmarks before smoothing
+          lastLandmarksRef.current = rawLandmarks;
+        } else {
+          lastLandmarksRef.current = null;
         }
+      } else {
+        // Use cached raw landmarks on skipped frames
+        rawLandmarks = lastLandmarksRef.current;
+      }
+      
+      // Always apply smoothing to landmarks (whether new or cached) for consistent smooth rendering
+      let landmarks = rawLandmarks;
+      if (landmarks && SMOOTHING_CONFIG.enabled && landmarkSmootherRef.current) {
+        landmarks = landmarkSmootherRef.current.smooth(landmarks);
+      }
+      
+      // Always draw if we have landmarks (either new or cached)
+      if (landmarks) {
+        let smoothedAngles = lastAnglesRef.current;
+        let smoothedOrientations = lastOrientationsRef.current;
         
-        // Calculate angles and orientations
-        const rawAngles = calculateAllAngles(landmarks);
-        const rawOrientations = calculateAllOrientations(landmarks);
-        
-        // Apply angle smoothing if enabled
-        let smoothedAngles = rawAngles;
-        if (SMOOTHING_CONFIG.enabled && angleSmootherRef.current && rawAngles) {
-          smoothedAngles = angleSmootherRef.current.smoothAngles(rawAngles);
-        }
-        
-        // Update state
-        setAngles(smoothedAngles);
-        setOrientations(rawOrientations);
-        
-        // Create structured pose data and publish
-        // Only publish if we have valid, visible landmarks
-        const poseData = createPoseData(
-          landmarks,
-          smoothedAngles,
-          rawOrientations,
-          performance.now(),
-          currentFps || 0
-        );
-        
-        // Only publish and log if we have valid data
-        if (poseData) {
-          // Publish pose data via pub/sub
-          posePubSub.publish(poseData);
+        // Only calculate angles/orientations on detection frames (expensive operations)
+        if (shouldRunDetection) {
+          // Calculate angles and orientations
+          const rawAngles = calculateAllAngles(landmarks);
+          const calculatedOrientations = calculateAllOrientations(landmarks);
           
-          // Save sample data (first valid frame)
-          // saveSample(poseData);
+          // Apply angle smoothing if enabled
+          smoothedAngles = rawAngles;
+          if (SMOOTHING_CONFIG.enabled && angleSmootherRef.current && rawAngles) {
+            smoothedAngles = angleSmootherRef.current.smoothAngles(rawAngles);
+          }
+          
+          // Apply orientation smoothing to reduce fluctuations
+          smoothedOrientations = calculatedOrientations;
+          if (SMOOTHING_CONFIG.enabled && orientationSmootherRef.current && calculatedOrientations) {
+            smoothedOrientations = orientationSmootherRef.current.smoothOrientations(calculatedOrientations);
+          }
+          
+          // Cache smoothed values for non-detection frames
+          lastAnglesRef.current = smoothedAngles;
+          lastOrientationsRef.current = smoothedOrientations;
         }
         
-        // Draw pose landmarks on top of video
+        // Update state (use cached smoothed values if available)
+        if (smoothedAngles) {
+          setAngles(smoothedAngles);
+        }
+        if (smoothedOrientations) {
+          setOrientations(smoothedOrientations);
+        }
+        
+        // Create structured pose data and publish (only on detection frames)
+        if (shouldRunDetection && smoothedAngles && smoothedOrientations) {
+          const poseData = createPoseData(
+            landmarks,
+            smoothedAngles,
+            smoothedOrientations,
+            performance.now(),
+            currentFps || 0
+          );
+          
+          // Only publish and log if we have valid data
+          if (poseData) {
+            // Publish pose data via pub/sub
+            posePubSub.publish(poseData);
+          }
+        }
+        
+        // Draw pose landmarks on top of video (every frame for smooth rendering)
         drawPose(landmarks, canvas, ctx);
       } else {
         setAngles(null);
         setOrientations(null);
+        lastAnglesRef.current = null;
+        lastOrientationsRef.current = null;
       }
     }
   }, []);
@@ -179,11 +231,7 @@ export const usePoseDetection = () => {
   // Start inference loop
   const startInferenceLoop = useCallback((video, canvas) => {
     if (!poseLandmarkerRef.current || !video || !canvas) {
-      console.error('Cannot start inference loop: missing dependencies', {
-        hasModel: !!poseLandmarkerRef.current,
-        hasVideo: !!video,
-        hasCanvas: !!canvas
-      });
+      console.error('Cannot start inference loop: missing dependencies');
       return;
     }
 
@@ -214,6 +262,10 @@ export const usePoseDetection = () => {
       lastVideoTimeRef.current = -1;
       lastTimeRef.current = 0;
       frameCountRef.current = 0;
+      frameSkipCounterRef.current = 0;
+      lastLandmarksRef.current = null;
+      lastAnglesRef.current = null;
+      lastOrientationsRef.current = null;
 
       const processFrame = (currentTime) => {
         if (!isRunningRef.current) {
@@ -230,10 +282,8 @@ export const usePoseDetection = () => {
         }
 
         updateFPS(currentTime);
-        // Calculate current FPS for pose data
-        const deltaTime = currentTime - lastTimeRef.current;
-        const currentFps = deltaTime > 0 ? Math.round((frameCountRef.current * 1000) / deltaTime) : fps;
-        runInference(video, canvas, ctx, currentFps);
+        // Use the official FPS state (updated every 1 second) for pose data
+        runInference(video, canvas, ctx, fps);
         animationFrameRef.current = requestAnimationFrame(processFrame);
       };
 
@@ -265,6 +315,9 @@ export const usePoseDetection = () => {
     // Reset smoothers
     if (angleSmootherRef.current) {
       angleSmootherRef.current.reset();
+    }
+    if (orientationSmootherRef.current) {
+      orientationSmootherRef.current.reset();
     }
     if (landmarkSmootherRef.current) {
       landmarkSmootherRef.current.reset();

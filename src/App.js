@@ -6,7 +6,6 @@ import VideoCanvas from './components/VideoCanvas';
 import Controls from './components/Controls';
 import AngleDisplay from './components/AngleDisplay';
 import Info from './components/Info';
-// Jump Detection Module (can be removed by deleting jumpDetection folder)
 import { JumpWidgets } from './jumpDetection';
 import './App.css';
 
@@ -105,24 +104,32 @@ function App() {
         )}
 
         {!displayError && (
-          <>
-            <StatusDisplay isModelLoaded={isModelLoaded} fps={fps} />
+          <div className="main-content">
+            <div className="camera-section">
+              <VideoCanvas ref={canvasRef} videoRef={videoRef} />
+            </div>
+            <div className="data-section">
+              <div className="data-card">
+                <StatusDisplay isModelLoaded={isModelLoaded} fps={fps} />
+                <Controls
+                  isModelLoaded={isModelLoaded}
+                  isRunning={isRunning}
+                  onStart={handleStart}
+                  onStop={handleStop}
+                />
+              </div>
 
-            <VideoCanvas ref={canvasRef} videoRef={videoRef} />
+              <div className="data-card">
+                <AngleDisplay angles={angles} orientations={orientations} />
+              </div>
 
-            <Controls
-              isModelLoaded={isModelLoaded}
-              isRunning={isRunning}
-              onStart={handleStart}
-              onStop={handleStop}
-            />
+              <div className="data-card">
+                <JumpWidgets />
+              </div>
 
-            <AngleDisplay angles={angles} orientations={orientations} />
-
-            <JumpWidgets />
-
-            <Info />
-          </>
+              <Info />
+            </div>
+          </div>
         )}
       </header>
     </div>

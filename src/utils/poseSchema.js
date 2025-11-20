@@ -246,8 +246,6 @@ const detectActions = (angles, orientations) => {
   );
   const armsRaised = leftArmRaised || rightArmRaised;
 
-  // Jumping detection (basic - will be enhanced later)
-  // For now, just placeholder
   const jumping = false;
 
   return {

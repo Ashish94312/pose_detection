@@ -168,8 +168,25 @@ export const calculateSegmentOrientation = (p1, p2, minDistance = 0.03) => {
     magnitude: magnitude
   };
   
-  // Calculate angle in XY plane (for 2D visualization)
-  const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+  // Calculate biomechanically meaningful orientation angle
+  // Using atan2(dx, dy) instead of atan2(dy, dx) gives orientation relative to vertical:
+  //   0° = vertical down (pointing straight down)
+  //   +90° = horizontal right
+  //   -90° = horizontal left
+  //   ±45° = diagonal
+  // This is more intuitive for human limb orientation than camera coordinates
+  let angle = Math.atan2(dx, dy) * (180 / Math.PI);
+  
+  // Normalize to [-90, +90] range for better readability and biomechanical interpretation
+  // This represents the tilt from vertical, which is more meaningful for human posture
+  // Angles outside this range are flipped by 180° to represent the same physical orientation
+  // from the opposite direction (e.g., 135° → -45°, -135° → 45°)
+  if (angle > 90) {
+    angle -= 180;
+  } else if (angle < -90) {
+    angle += 180;
+  }
+  
   direction.angle = angle;
   
   return direction;

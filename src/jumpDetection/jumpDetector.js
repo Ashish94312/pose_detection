@@ -39,31 +39,81 @@ class JumpDetector {
     };
     
     // Configuration
+    // 
+    // PARAMETER RATIONALE:
+    // ===================
+    // 
+    // 1. Dynamic Scale Calculation (normalizedToMeters):
+    //    - MediaPipe provides normalized coordinates (0-1), not real-world units
+    //    - Hardcoded scale (e.g., 2.0) was WRONG - it assumed a fixed camera distance/person size
+    //    - Now calculates dynamically from person's actual height in frame
+    //    - Uses head-to-ankle or shoulder-to-hip distance to estimate scale
+    //    - This adapts to different camera distances, resolutions, and person heights
+    //
+    // 2. Velocity Thresholds (in normalized units):
+    //    - takeoffVelocityThresholdNormalized: 0.15 normalized units/s
+    //      * For typical scale (~3-5 m/unit), this equals ~0.45-0.75 m/s
+    //      * Typical jump takeoff velocity: 2-4 m/s, so this is conservative
+    //      * Lower than old 0.3 m/s (which was too strict for smaller jumps)
+    //    - landingVelocityThresholdNormalized: 0.10 normalized units/s
+    //      * Lower than takeoff because landing is more gradual
+    //      * Prevents false triggers from small movements
+    //
+    // 3. Time Gates:
+    //    - minAirborneTime: 100ms - Minimum time in air (prevents false jumps from noise)
+    //    - takeoffDebounceTime: 50ms - Prevents false takeoff from single-frame spikes
+    //    - landingDebounceTime: 50ms - Prevents false landing from single-frame spikes
+    //    - cooldownAfterJump: 300ms - Prevents double-counting (reduced from 500ms)
+    //
+    // 4. Validation Thresholds:
+    //    - minJumpHeightNormalized: 0.05 normalized units
+    //      * For typical scale, this equals ~15-25 cm
+    //      * Filters out tiny movements that aren't real jumps
+    //    - minCrouchDepthNormalized: 0.03 normalized units (optional, disabled by default)
+    //      * Was too strict - many legitimate jumps don't have deep crouch
+    //
+    // 5. Crouch Detection:
+    //    - requireCrouch: false - DISABLED by default
+    //      * Was preventing legitimate jumps (e.g., countermovement jumps)
+    //      * Baseline hip height might not be set initially
+    //    - requireBentKnees: true - Still enabled
+    //      * Helps distinguish jumps from other upward movements
+    //      * More lenient: only requires ONE knee bent (not both)
+    //
     this.config = {
-      // Real-world scaling
-      normalizedToMeters: 2.0,
+      // Real-world scaling - will be calculated dynamically from person height
+      // Average person height: ~1.7m, typical normalized height: ~0.3-0.5
+      // This gives us a rough estimate that will be refined
+      normalizedToMeters: null, // Will be calculated dynamically
+      estimatedPersonHeight: 1.7, // meters - average adult height
       
       // FSM Transition Thresholds
-      takeoffVelocityThreshold: 0.3, // m/s - upward velocity to trigger takeoff
-      landingVelocityThreshold: 0.2, // m/s - downward velocity to trigger landing
+      // These are in normalized units (0-1) to avoid dependency on scale
+      // Will be converted to m/s using dynamic scale
+      takeoffVelocityThresholdNormalized: 0.10, // normalized units/s - upward velocity to trigger takeoff (reduced for better sensitivity)
+      landingVelocityThresholdNormalized: 0.08, // normalized units/s - downward velocity to trigger landing (reduced for better sensitivity)
       landingGRFThreshold: 1.2, // Multiple of body weight (e.g., 1.2 = 20% above weight)
       
       // Time gating (critical for FSM robustness)
-      minAirborneTime: 100, // ms - minimum time in AIRBORNE state
-      takeoffDebounceTime: 50, // ms - debounce for takeoff detection
-      landingDebounceTime: 50, // ms - debounce for landing detection
+      minAirborneTime: 80, // ms - minimum time in AIRBORNE state (reduced for faster detection)
+      takeoffDebounceTime: 30, // ms - debounce for takeoff detection (reduced for faster response)
+      landingDebounceTime: 30, // ms - debounce for landing detection (reduced for faster response)
       maxJumpDuration: 2000, // ms - safety timeout
-      cooldownAfterJump: 500, // ms - cooldown after landing
+      cooldownAfterJump: 300, // ms - cooldown after landing (reduced from 500)
       
-      // Validation thresholds
-      minJumpHeight: 0.10, // m - minimum jump height to count
-      minCrouchDepth: 0.06, // m - minimum crouch for jump detection
+      // Validation thresholds (in normalized units)
+      minJumpHeightNormalized: 0.05, // normalized units - minimum jump height to count
+      minCrouchDepthNormalized: 0.03, // normalized units - minimum crouch for jump detection
       
       // Physics
       mass: 70, // kg
-      noiseThreshold: 0.02, // m/s - velocity noise gate
+      noiseThresholdNormalized: 0.01, // normalized units/s - velocity noise gate
       velocitySmoothing: 0.35, // EMA alpha (0.3-0.4)
       accelerationSmoothing: 0.2, // EMA alpha for acceleration
+      
+      // Crouch detection
+      requireCrouch: false, // Make crouch optional - can be too strict
+      requireBentKnees: true, // Still require bent knees for takeoff
     };
     
     // Velocity and acceleration tracking
@@ -79,9 +129,16 @@ class JumpDetector {
     this.maxHeightHistoryLength = 10;
     this.baselineHipHeight = null;
     
+    // Dynamic scale calculation
+    this.personHeightNormalized = null; // Person's height in normalized coordinates
+    this.scaleCalculationFrames = 0;
+    this.minScaleCalculationFrames = 10; // Need at least 10 frames to calculate scale (reduced for faster initialization)
+    
     // FSM timing
     this.stateEntryTime = 0; // When current state was entered
     this.lastSignificantMovement = 0;
+    this.upwardVelocityStartTime = 0; // When upward velocity was first detected (for debounce)
+    this.downwardVelocityStartTime = 0; // When downward velocity was first detected (for debounce)
     
     // Callbacks
     this.onJumpDetected = null;
@@ -126,12 +183,102 @@ class JumpDetector {
   }
 
   /**
+   * Calculate dynamic scale factor from person's height
+   * Uses head-to-ankle or shoulder-to-hip distance
+   */
+  calculateScaleFactor(poseData) {
+    if (!poseData || !poseData.joints) {
+      return null;
+    }
+
+    const joints = poseData.joints;
+    
+    // Method 1: Use head (nose) to ankle distance
+    if (joints.nose && joints.leftAnkle && joints.rightAnkle) {
+      const nose = joints.nose;
+      const leftAnkle = joints.leftAnkle;
+      const rightAnkle = joints.rightAnkle;
+      
+      if (nose.visible && (leftAnkle.visible || rightAnkle.visible)) {
+        const ankleY = leftAnkle.visible && rightAnkle.visible
+          ? (leftAnkle.y + rightAnkle.y) / 2
+          : (leftAnkle.visible ? leftAnkle.y : rightAnkle.y);
+        
+        const heightNormalized = Math.abs(nose.y - ankleY);
+        if (heightNormalized > 0.1 && heightNormalized < 0.9) { // Reasonable bounds
+          return {
+            heightNormalized: heightNormalized,
+            scale: this.config.estimatedPersonHeight / heightNormalized,
+            method: 'head-to-ankle'
+          };
+        }
+      }
+    }
+    
+    // Method 2: Use shoulder-to-hip distance (more stable)
+    if (joints.leftShoulder && joints.rightShoulder && joints.leftHip && joints.rightHip) {
+      const leftShoulder = joints.leftShoulder;
+      const rightShoulder = joints.rightShoulder;
+      const leftHip = joints.leftHip;
+      const rightHip = joints.rightHip;
+      
+      if (leftShoulder.visible && rightShoulder.visible && 
+          leftHip.visible && rightHip.visible) {
+        const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+        const hipY = (leftHip.y + rightHip.y) / 2;
+        const torsoHeightNormalized = Math.abs(shoulderY - hipY);
+        
+        // Typical torso height is ~0.5m, but varies by person
+        // Use a more conservative estimate
+        const estimatedTorsoHeight = 0.5; // meters
+        if (torsoHeightNormalized > 0.05 && torsoHeightNormalized < 0.3) {
+          return {
+            heightNormalized: torsoHeightNormalized,
+            scale: estimatedTorsoHeight / torsoHeightNormalized,
+            method: 'shoulder-to-hip'
+          };
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
    * Main FSM processing function
    * @param {Object} poseData - Pose data from pub/sub
    */
   processPoseData(poseData) {
     if (!poseData || !poseData.joints) {
       return;
+    }
+
+    // Calculate dynamic scale factor if not set
+    if (this.config.normalizedToMeters === null) {
+      this.scaleCalculationFrames++;
+      const scaleInfo = this.calculateScaleFactor(poseData);
+      
+      if (scaleInfo) {
+        if (this.scaleCalculationFrames >= this.minScaleCalculationFrames) {
+          // Use exponential moving average to smooth scale calculation
+          if (this.config.normalizedToMeters === null) {
+            this.config.normalizedToMeters = scaleInfo.scale;
+            this.personHeightNormalized = scaleInfo.heightNormalized;
+            console.log(`[JumpDetector] Scale calculated: ${scaleInfo.scale.toFixed(2)} m/unit (${scaleInfo.method})`);
+          } else {
+            // Smooth the scale factor
+            const alpha = 0.1; // Slow adaptation
+            this.config.normalizedToMeters = 
+              alpha * scaleInfo.scale + (1 - alpha) * this.config.normalizedToMeters;
+          }
+        }
+      } else if (this.scaleCalculationFrames >= 30) {
+        // Fallback: use estimated scale if calculation fails after many frames
+        // Assume typical person height of 1.7m and normalized height of ~0.4
+        const fallbackScale = this.config.estimatedPersonHeight / 0.4;
+        this.config.normalizedToMeters = fallbackScale;
+        console.log(`[JumpDetector] Using fallback scale: ${fallbackScale.toFixed(2)} m/unit`);
+      }
     }
 
     // Calculate velocity and acceleration
@@ -142,6 +289,12 @@ class JumpDetector {
     if (!this.previousPoseData) {
       this.previousPoseData = poseData;
       this.stateEntryTime = poseData.timestamp;
+      
+      // Initialize baseline height early
+      const hipCenter = this.getHipCenter(poseData.joints);
+      if (hipCenter && this.baselineHipHeight === null) {
+        this.baselineHipHeight = hipCenter.y;
+      }
       return;
     }
 
@@ -151,6 +304,11 @@ class JumpDetector {
       this.heightHistory.push(hipCenter.y);
       if (this.heightHistory.length > this.maxHeightHistoryLength) {
         this.heightHistory.shift();
+      }
+      
+      // Update baseline height if we don't have one yet
+      if (this.baselineHipHeight === null) {
+        this.baselineHipHeight = hipCenter.y;
       }
     }
 
@@ -205,7 +363,7 @@ class JumpDetector {
         }
         
         // Transition to LANDING: downward velocity + minimum airtime
-        if (this.canTransitionToLanding(verticalVelocity, timeInState)) {
+        if (this.canTransitionToLanding(poseData, verticalVelocity, timeInState)) {
           this.transitionToLanding(poseData);
         }
         // Safety: timeout back to GROUNDED
@@ -245,36 +403,64 @@ class JumpDetector {
       return false;
     }
 
-    // Debounce: must maintain upward velocity for debounce time
-    if (timeInState < this.config.takeoffDebounceTime) {
-      return false;
-    }
-
-    // Must have significant upward velocity
-    if (verticalVelocity <= this.config.takeoffVelocityThreshold) {
-      return false;
-    }
-
-    // Optional: check for crouch (both knees bent)
-    const angles = poseData.angles;
-    const joints = poseData.joints;
-    const hipCenter = this.getHipCenter(joints);
+    // Velocity is already in m/s from calculateVerticalVelocity
+    // Convert threshold from normalized units to m/s
+    const scale = this.config.normalizedToMeters || 1.0;
+    const takeoffThreshold = this.config.takeoffVelocityThresholdNormalized * scale;
     
-    if (angles && hipCenter && this.baselineHipHeight !== null) {
-      const leftKnee = angles.leftLeg?.knee;
-      const rightKnee = angles.rightLeg?.knee;
+    // Check if we have significant upward velocity
+    const hasUpwardVelocity = verticalVelocity > takeoffThreshold;
+    
+    if (hasUpwardVelocity) {
+      // Track when upward velocity was first detected
+      if (this.upwardVelocityStartTime === 0) {
+        this.upwardVelocityStartTime = poseData.timestamp;
+      }
       
-      // Both knees must be bent
-      const hasBentKnees = (leftKnee !== null && leftKnee < 150) && 
-                           (rightKnee !== null && rightKnee < 150);
-      
-      // Crouch check: hip lower than baseline
-      const hipDropNormalized = hipCenter.y - this.baselineHipHeight;
-      const hipDropMeters = hipDropNormalized * this.config.normalizedToMeters;
-      const hasCrouch = hipDropMeters > this.config.minCrouchDepth;
-      
-      if (!hasBentKnees || !hasCrouch) {
+      // Debounce: must maintain upward velocity for debounce time
+      const timeSinceUpwardVelocity = poseData.timestamp - this.upwardVelocityStartTime;
+      if (timeSinceUpwardVelocity < this.config.takeoffDebounceTime) {
         return false;
+      }
+    } else {
+      // Reset upward velocity tracking if velocity drops
+      this.upwardVelocityStartTime = 0;
+      return false;
+    }
+
+    // Check for bent knees (if required)
+    if (this.config.requireBentKnees) {
+      const angles = poseData.angles;
+      if (angles) {
+        const leftKnee = angles.leftLeg?.knee;
+        const rightKnee = angles.rightLeg?.knee;
+        
+        // At least one knee should be bent (more lenient than requiring both)
+        // 160 degrees is a reasonable threshold (straight leg is ~180)
+        const hasBentKnees = (leftKnee !== null && leftKnee < 160) || 
+                            (rightKnee !== null && rightKnee < 160);
+        
+        if (!hasBentKnees) {
+          console.debug(`[JumpDetector] Takeoff rejected: knees not bent (L: ${leftKnee?.toFixed(1) || 'N/A'}, R: ${rightKnee?.toFixed(1) || 'N/A'})`);
+          return false;
+        }
+      }
+    }
+
+    // Optional crouch check (if enabled and baseline available)
+    if (this.config.requireCrouch) {
+      const joints = poseData.joints;
+      const hipCenter = this.getHipCenter(joints);
+      
+      if (hipCenter && this.baselineHipHeight !== null && scale > 0) {
+        const hipDropNormalized = hipCenter.y - this.baselineHipHeight;
+        const hipDropMeters = hipDropNormalized * scale;
+        const minCrouchMeters = this.config.minCrouchDepthNormalized * scale;
+        const hasCrouch = hipDropMeters > minCrouchMeters;
+        
+        if (!hasCrouch) {
+          return false;
+        }
       }
     }
 
@@ -287,20 +473,47 @@ class JumpDetector {
   canTransitionToAirborne(verticalVelocity, timeInState) {
     // Velocity must have peaked (no longer strongly upward)
     // Small positive or negative velocity indicates peak reached
-    return verticalVelocity <= 0.06; // m/s threshold
+    // Use normalized threshold (0.03 normalized units/s ≈ 0.06 m/s for typical scale)
+    const scale = this.config.normalizedToMeters || 1.0;
+    const peakThreshold = 0.03 * scale; // Convert to m/s
+    // Velocity is already in m/s, so compare directly
+    return verticalVelocity <= peakThreshold;
   }
 
   /**
    * Check if can transition from AIRBORNE to LANDING
    */
-  canTransitionToLanding(verticalVelocity, timeInState) {
+  canTransitionToLanding(poseData, verticalVelocity, timeInState) {
     // Must have minimum airtime (critical for FSM robustness)
     if (timeInState < this.config.minAirborneTime) {
       return false;
     }
 
-    // Must have significant downward velocity
-    return verticalVelocity <= -this.config.landingVelocityThreshold;
+    // Velocity is already in m/s from calculateVerticalVelocity
+    // Convert threshold from normalized units to m/s
+    const scale = this.config.normalizedToMeters || 1.0;
+    const landingThreshold = this.config.landingVelocityThresholdNormalized * scale;
+    
+    // Check if we have significant downward velocity
+    const hasDownwardVelocity = verticalVelocity < -landingThreshold;
+    
+    if (hasDownwardVelocity) {
+      // Track when downward velocity was first detected
+      if (this.downwardVelocityStartTime === 0) {
+        this.downwardVelocityStartTime = this.previousPoseData?.timestamp || Date.now();
+      }
+      
+      // Debounce: must maintain downward velocity for debounce time
+      const timeSinceDownwardVelocity = poseData.timestamp - this.downwardVelocityStartTime;
+      if (timeSinceDownwardVelocity >= this.config.landingDebounceTime) {
+        return true;
+      }
+    } else {
+      // Reset downward velocity tracking if velocity changes
+      this.downwardVelocityStartTime = 0;
+    }
+    
+    return false;
   }
 
   /**
@@ -323,12 +536,14 @@ class JumpDetector {
   transitionToTakeoff(poseData, hipCenter) {
     this.fsmState = FSM_STATES.TAKEOFF;
     this.stateEntryTime = poseData.timestamp;
+    this.upwardVelocityStartTime = 0; // Reset for next time
     
     // Initialize jump tracking
     this.jumpState.currentJump = {
       takeoffTime: poseData.timestamp,
+      takeoffHeight: hipCenter ? hipCenter.y : null, // Store takeoff height for jump height calculation
       landingTime: null,
-      peakHeight: hipCenter ? hipCenter.y : null,
+      peakHeight: hipCenter ? hipCenter.y : null, // Minimum Y (highest point)
       peakGRF: null,
       airtime: 0,
     };
@@ -376,6 +591,7 @@ class JumpDetector {
   transitionToLanding(poseData) {
     this.fsmState = FSM_STATES.LANDING;
     this.stateEntryTime = poseData.timestamp;
+    this.downwardVelocityStartTime = 0; // Reset for next time
     
     if (this.jumpState.currentJump) {
       this.jumpState.currentJump.landingTime = poseData.timestamp;
@@ -395,42 +611,66 @@ class JumpDetector {
     
     this.fsmState = FSM_STATES.GROUNDED;
     this.stateEntryTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+    this.upwardVelocityStartTime = 0; // Reset upward velocity tracking
+    this.downwardVelocityStartTime = 0; // Reset downward velocity tracking
     
     // Validate and finalize jump if we were in a jump sequence
     if (wasInJump && this.jumpState.currentJump) {
       const jump = this.jumpState.currentJump;
+      
+      // Ensure landingTime is set (use current timestamp if not set)
+      if (!jump.landingTime) {
+        jump.landingTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+      }
       
       // Calculate final metrics
       const airtime = jump.landingTime && jump.takeoffTime 
         ? jump.landingTime - jump.takeoffTime 
         : 0;
       
-      const hipCenter = this.getHipCenter(this.previousPoseData?.joints);
       let jumpHeight = null;
-      if (jump.peakHeight !== null && hipCenter) {
-        const jumpHeightNormalized = hipCenter.y - jump.peakHeight;
-        jumpHeight = jumpHeightNormalized * this.config.normalizedToMeters;
+      const scale = this.config.normalizedToMeters || 1.0; // Use scale for all calculations
+      
+      // Calculate jump height: difference between takeoff height and peak height
+      // In screen coordinates, Y increases downward, so lower Y = higher position
+      // peakHeight is the minimum Y (highest point), takeoffHeight is the Y at takeoff
+      if (jump.peakHeight !== null && jump.takeoffHeight !== null && scale > 0) {
+        const jumpHeightNormalized = jump.takeoffHeight - jump.peakHeight; // Positive = jumped up
+        jumpHeight = jumpHeightNormalized * scale;
       }
       
-      // Validate jump
+      // Validate jump (convert minJumpHeight to meters if needed)
+      const minJumpHeightMeters = this.config.minJumpHeightNormalized * scale;
       const isValidJump = jumpHeight !== null && 
-                          jumpHeight >= this.config.minJumpHeight &&
+                          jumpHeight >= minJumpHeightMeters &&
                           airtime >= this.config.minAirborneTime;
       
-      if (isValidJump) {
-        // Valid jump - trigger landing callback
-        if (this.onLandingDetected) {
-          this.onLandingDetected({
-            timestamp: jump.landingTime || this.previousPoseData.timestamp,
-            jumpNumber: this.jumpState.jumpCount,
-            jumpHeight: jumpHeight,
-            airTime: airtime,
-            takeoffTime: jump.takeoffTime,
-            landingTime: jump.landingTime,
-            groundReactionForce: jump.peakGRF,
-          });
-        }
+      // Always trigger landing callback with calculated metrics (even for invalid jumps)
+      // This ensures the UI always shows the data
+      if (this.onLandingDetected) {
+        const landingData = {
+          timestamp: jump.landingTime,
+          jumpNumber: this.jumpState.jumpCount,
+          jumpHeight: jumpHeight,
+          airTime: airtime,
+          takeoffTime: jump.takeoffTime,
+          landingTime: jump.landingTime,
+          groundReactionForce: jump.peakGRF,
+        };
         
+        console.log('[JumpDetector] Landing detected:', {
+          airTime: landingData.airTime,
+          jumpHeight: landingData.jumpHeight,
+          landingTime: landingData.landingTime,
+          takeoffHeight: jump.takeoffHeight,
+          peakHeight: jump.peakHeight,
+          scale: scale,
+        });
+        
+        this.onLandingDetected(landingData);
+      }
+      
+      if (isValidJump) {
         console.log('FSM: Jump complete', {
           jumpNumber: this.jumpState.jumpCount,
           jumpHeight: jumpHeight,
@@ -443,6 +683,8 @@ class JumpDetector {
           reason: reason,
           jumpHeight: jumpHeight,
           airtime: airtime,
+          minJumpHeightMeters: minJumpHeightMeters,
+          minAirborneTime: this.config.minAirborneTime,
         });
         // Reset jump count if this was the first invalid jump
         if (this.jumpState.jumpCount > 0) {
@@ -484,21 +726,25 @@ class JumpDetector {
       return this.smoothedVelocity;
     }
 
-    // Raw velocity from raw landmarks
+    // Raw velocity from raw landmarks (in normalized units per second)
     const deltaYNormalized = previousHip.y - currentHip.y;
-    const deltaYMeters = deltaYNormalized * this.config.normalizedToMeters;
-    const rawVelocityMs = deltaYMeters / timeDelta;
+    const rawVelocityNormalized = deltaYNormalized / timeDelta;
+    
+    // Convert to m/s if scale is available, otherwise keep in normalized units
+    const scale = this.config.normalizedToMeters || 1.0;
+    const rawVelocityMs = rawVelocityNormalized * scale;
     this.rawVelocity = rawVelocityMs;
 
-    // Noise gate
-    const absVelocity = Math.abs(rawVelocityMs);
-    if (absVelocity < this.config.noiseThreshold) {
+    // Noise gate (in normalized units)
+    const noiseThresholdNormalized = this.config.noiseThresholdNormalized;
+    const absVelocityNormalized = Math.abs(rawVelocityNormalized);
+    if (absVelocityNormalized < noiseThresholdNormalized) {
       this.smoothedVelocity = this.smoothedVelocity * 0.9;
       if (Math.abs(this.smoothedVelocity) < 0.01) {
         this.smoothedVelocity = 0;
       }
       
-      // Update baseline when stationary
+      // Update baseline when stationary (in normalized units)
       if (this.baselineHipHeight === null || 
           Math.abs(currentHip.y - this.baselineHipHeight) < 0.01) {
         this.baselineHipHeight = currentHip.y;
@@ -507,7 +753,7 @@ class JumpDetector {
       return this.smoothedVelocity;
     }
     
-    // Smooth velocity with EMA
+    // Smooth velocity with EMA (work in normalized units, convert at end)
     if (this.smoothedVelocity === 0) {
       this.smoothedVelocity = rawVelocityMs;
     } else {
@@ -516,14 +762,14 @@ class JumpDetector {
         (1 - this.config.velocitySmoothing) * this.smoothedVelocity;
     }
     
-    // Store smoothed velocity in history
+    // Store smoothed velocity in history (in m/s)
     this.velocityHistory.push(this.smoothedVelocity);
     if (this.velocityHistory.length > this.maxHistoryLength) {
       this.velocityHistory.shift();
     }
     
     this.lastSignificantMovement = poseData.timestamp;
-    return this.smoothedVelocity;
+    return this.smoothedVelocity; // Returns in m/s
   }
 
   /**
@@ -545,11 +791,14 @@ class JumpDetector {
     const absVelocity = Math.abs(verticalVelocity);
     
     // Hard clamp to bodyweight when stationary
+    // Convert noise threshold to m/s for comparison
+    const scale = this.config.normalizedToMeters || 1.0;
+    const noiseThresholdMs = this.config.noiseThresholdNormalized * scale;
     const recentVelocities = this.velocityHistory.slice(-5);
     const allSmall = recentVelocities.length >= 3 && 
-                     recentVelocities.every(v => Math.abs(v) < this.config.noiseThreshold);
+                     recentVelocities.every(v => Math.abs(v) < noiseThresholdMs);
     
-    if (absVelocity < this.config.noiseThreshold || allSmall) {
+    if (absVelocity < noiseThresholdMs || allSmall) {
       return {
         verticalVelocity: 0,
         acceleration: 0,
@@ -660,6 +909,11 @@ class JumpDetector {
     this.smoothedAcceleration = 0;
     this.baselineHipHeight = null;
     this.lastSignificantMovement = 0;
+    this.config.normalizedToMeters = null; // Reset scale
+    this.personHeightNormalized = null;
+    this.scaleCalculationFrames = 0;
+    this.upwardVelocityStartTime = 0;
+    this.downwardVelocityStartTime = 0;
   }
 }
 

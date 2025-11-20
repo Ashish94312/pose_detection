@@ -4,8 +4,10 @@ export const POSE_CONNECTIONS = [
   [10, 9], [9, 0], [0, 1], [1, 2], [2, 3], [3, 7],
   [0, 4], [4, 5], [5, 6], [6, 8],
   // Upper body
-  [12, 11], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21],
-  [16, 14], [14, 12], [12, 24], [11, 23],
+  [12, 11], // Connect shoulders
+  [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], // Left arm: shoulder -> elbow -> wrist -> fingers
+  [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], // Right arm: shoulder -> elbow -> wrist -> fingers
+  [12, 24], [11, 23], // Shoulders to hips
   // Lower body
   [24, 26], [26, 28], [28, 30], [28, 32],
   [23, 25], [25, 27], [27, 29], [27, 31],
@@ -32,20 +34,28 @@ export const drawPose = (landmarks, canvas, ctx) => {
     return;
   }
 
+  // Save context state to avoid affecting other drawing operations
+  ctx.save();
+
   // Draw connections
   ctx.strokeStyle = DRAWING_STYLES.connectionColor;
   ctx.lineWidth = DRAWING_STYLES.connectionWidth;
 
   POSE_CONNECTIONS.forEach(([start, end]) => {
-    if (landmarks[start] && landmarks[end]) {
+    const startLandmark = landmarks[start];
+    const endLandmark = landmarks[end];
+    // Only draw if both landmarks exist and are visible (visibility > 0.5)
+    if (startLandmark && endLandmark && 
+        (startLandmark.visibility === undefined || startLandmark.visibility > 0.5) &&
+        (endLandmark.visibility === undefined || endLandmark.visibility > 0.5)) {
       ctx.beginPath();
       ctx.moveTo(
-        landmarks[start].x * canvas.width,
-        landmarks[start].y * canvas.height
+        startLandmark.x * canvas.width,
+        startLandmark.y * canvas.height
       );
       ctx.lineTo(
-        landmarks[end].x * canvas.width,
-        landmarks[end].y * canvas.height
+        endLandmark.x * canvas.width,
+        endLandmark.y * canvas.height
       );
       ctx.stroke();
     }
@@ -54,15 +64,21 @@ export const drawPose = (landmarks, canvas, ctx) => {
   // Draw landmarks
   ctx.fillStyle = DRAWING_STYLES.landmarkColor;
   landmarks.forEach((landmark) => {
-    ctx.beginPath();
-    ctx.arc(
-      landmark.x * canvas.width,
-      landmark.y * canvas.height,
-      DRAWING_STYLES.landmarkRadius,
-      0,
-      2 * Math.PI
-    );
-    ctx.fill();
+    // Only draw visible landmarks (visibility > 0.5)
+    if (landmark && (landmark.visibility === undefined || landmark.visibility > 0.5)) {
+      ctx.beginPath();
+      ctx.arc(
+        landmark.x * canvas.width,
+        landmark.y * canvas.height,
+        DRAWING_STYLES.landmarkRadius,
+        0,
+        2 * Math.PI
+      );
+      ctx.fill();
+    }
   });
+
+  // Restore context state
+  ctx.restore();
 };
 

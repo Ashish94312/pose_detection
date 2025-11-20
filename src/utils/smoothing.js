@@ -69,19 +69,21 @@ export class KalmanFilter {
  * Smoothing manager for pose angles
  */
 export class AngleSmoother {
-  constructor(smoothingMethod = 'ema', smoothingFactor = 0.3) {
+  constructor(smoothingMethod = 'ema', smoothingFactor = 0.3, processNoise = null, measurementNoise = null) {
     this.smoothingMethod = smoothingMethod;
     this.smoothingFactor = smoothingFactor;
+    this.processNoise = processNoise;
+    this.measurementNoise = measurementNoise;
     this.filters = {};
   }
   
   getFilter(key) {
     if (!this.filters[key]) {
       if (this.smoothingMethod === 'kalman') {
-        this.filters[key] = new KalmanFilter(
-          this.smoothingFactor * 0.1,
-          this.smoothingFactor * 0.5
-        );
+        // Use provided parameters or fall back to calculated values
+        const pNoise = this.processNoise !== null ? this.processNoise : (this.smoothingFactor * 0.1);
+        const mNoise = this.measurementNoise !== null ? this.measurementNoise : (this.smoothingFactor * 0.5);
+        this.filters[key] = new KalmanFilter(pNoise, mNoise);
       } else {
         this.filters[key] = new ExponentialMovingAverage(this.smoothingFactor);
       }
@@ -109,6 +111,72 @@ export class AngleSmoother {
     return smoothed;
   }
   
+  /**
+   * Smooth orientations (objects with {x, y, z, angle, magnitude})
+   * Smooths the angle property and direction vector components
+   */
+  smoothOrientations(orientations) {
+    if (!orientations) return null;
+    
+    const smoothed = {};
+    for (const [key, orientation] of Object.entries(orientations)) {
+      if (!orientation || orientation === null) {
+        // Reset filters for this orientation segment
+        const angleKey = `${key}_angle`;
+        const xKey = `${key}_x`;
+        const yKey = `${key}_y`;
+        const zKey = `${key}_z`;
+        if (this.filters[angleKey]) this.filters[angleKey].reset();
+        if (this.filters[xKey]) this.filters[xKey].reset();
+        if (this.filters[yKey]) this.filters[yKey].reset();
+        if (this.filters[zKey]) this.filters[zKey].reset();
+        smoothed[key] = null;
+        continue;
+      }
+      
+      // Smooth angle property
+      let smoothedAngle = orientation.angle;
+      if (orientation.angle !== null && orientation.angle !== undefined && 
+          typeof orientation.angle === 'number' && !isNaN(orientation.angle)) {
+        const angleFilter = this.getFilter(`${key}_angle`);
+        smoothedAngle = angleFilter.update(orientation.angle);
+      }
+      
+      // Smooth direction vector components (x, y, z)
+      let smoothedX = orientation.x;
+      let smoothedY = orientation.y;
+      let smoothedZ = orientation.z;
+      
+      if (orientation.x !== null && orientation.x !== undefined && 
+          typeof orientation.x === 'number' && !isNaN(orientation.x)) {
+        const xFilter = this.getFilter(`${key}_x`);
+        smoothedX = xFilter.update(orientation.x);
+      }
+      
+      if (orientation.y !== null && orientation.y !== undefined && 
+          typeof orientation.y === 'number' && !isNaN(orientation.y)) {
+        const yFilter = this.getFilter(`${key}_y`);
+        smoothedY = yFilter.update(orientation.y);
+      }
+      
+      if (orientation.z !== null && orientation.z !== undefined && 
+          typeof orientation.z === 'number' && !isNaN(orientation.z)) {
+        const zFilter = this.getFilter(`${key}_z`);
+        smoothedZ = zFilter.update(orientation.z);
+      }
+      
+      // Reconstruct smoothed orientation object
+      smoothed[key] = {
+        x: smoothedX,
+        y: smoothedY,
+        z: smoothedZ,
+        angle: smoothedAngle,
+        magnitude: orientation.magnitude // Keep original magnitude
+      };
+    }
+    return smoothed;
+  }
+  
   reset() {
     Object.values(this.filters).forEach(filter => filter.reset());
     this.filters = {};
@@ -116,12 +184,25 @@ export class AngleSmoother {
 }
 
 /**
- * Smooth landmarks using EMA
+ * Smooth landmarks using EMA or Kalman filter
  */
 export class LandmarkSmoother {
-  constructor(alpha = 0.5) {
+  constructor(alpha = 0.5, useKalman = false, processNoise = 0.005, measurementNoise = 0.15) {
     this.alpha = alpha;
+    this.useKalman = useKalman;
+    this.processNoise = processNoise;
+    this.measurementNoise = measurementNoise;
     this.smoothedLandmarks = null;
+    // Per-landmark, per-coordinate Kalman filters
+    this.kalmanFilters = {};
+  }
+  
+  getKalmanFilter(landmarkIndex, coordinate) {
+    const key = `${landmarkIndex}_${coordinate}`;
+    if (!this.kalmanFilters[key]) {
+      this.kalmanFilters[key] = new KalmanFilter(this.processNoise, this.measurementNoise);
+    }
+    return this.kalmanFilters[key];
   }
   
   smooth(landmarks) {
@@ -129,6 +210,7 @@ export class LandmarkSmoother {
       return landmarks;
     }
     
+    // Initialize smoothed landmarks if needed
     if (!this.smoothedLandmarks || this.smoothedLandmarks.length !== landmarks.length) {
       this.smoothedLandmarks = landmarks.map(l => ({ ...l }));
       return landmarks;
@@ -136,12 +218,24 @@ export class LandmarkSmoother {
     
     const smoothed = landmarks.map((landmark, index) => {
       const prev = this.smoothedLandmarks[index];
-      return {
-        x: this.alpha * landmark.x + (1 - this.alpha) * prev.x,
-        y: this.alpha * landmark.y + (1 - this.alpha) * prev.y,
-        z: this.alpha * (landmark.z || 0) + (1 - this.alpha) * (prev.z || 0),
-        visibility: landmark.visibility || prev.visibility
-      };
+      
+      if (this.useKalman) {
+        // Use Kalman filter for each coordinate (better smoothing)
+        return {
+          x: this.getKalmanFilter(index, 'x').update(landmark.x),
+          y: this.getKalmanFilter(index, 'y').update(landmark.y),
+          z: this.getKalmanFilter(index, 'z').update(landmark.z || 0),
+          visibility: landmark.visibility || prev.visibility
+        };
+      } else {
+        // Use EMA (simpler, faster)
+        return {
+          x: this.alpha * landmark.x + (1 - this.alpha) * prev.x,
+          y: this.alpha * landmark.y + (1 - this.alpha) * prev.y,
+          z: this.alpha * (landmark.z || 0) + (1 - this.alpha) * (prev.z || 0),
+          visibility: landmark.visibility || prev.visibility
+        };
+      }
     });
     
     // Update stored smoothed landmarks
@@ -151,6 +245,7 @@ export class LandmarkSmoother {
   
   reset() {
     this.smoothedLandmarks = null;
+    this.kalmanFilters = {};
   }
 }
 

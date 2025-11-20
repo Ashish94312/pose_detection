@@ -81,8 +81,76 @@ If you aren't satisfied with the build tool and configuration choices, you can `
 
 - **Real-time Pose Detection**: Uses MediaPipe to detect human poses from webcam input
 - **Joint Angle Calculation**: Calculates and displays angles for various body joints
+- **Segment Orientation**: Calculates biomechanically meaningful segment orientations
 - **Jump Detection**: Includes jump detection capabilities with customizable widgets
 - **Smooth Visualization**: Real-time pose visualization on canvas with smooth rendering
+
+## Angle and Orientation Calculations
+
+### Joint Angles
+
+The application calculates **goniometric angles** (joint angles) between three points representing body segments. These angles are measured in degrees (0-180°) and represent the angle at a joint.
+
+**Calculation Method:**
+- Uses the dot product of two vectors to calculate the angle between three points
+- Points: `p1` (start of first segment) → `p2` (joint/vertex) → `p3` (end of second segment)
+- Formula: `angle = arccos((v1 · v2) / (|v1| × |v2|))`
+- Returns angle in degrees (0-180°)
+
+**Tracked Joint Angles:**
+- Left/Right Shoulder: Angle between hip-shoulder-elbow
+- Left/Right Elbow: Angle between shoulder-elbow-wrist
+- Left/Right Hip: Angle between shoulder-hip-knee
+- Left/Right Knee: Angle between hip-knee-ankle
+- Torso: Angle between left shoulder-left hip-right hip
+
+### Segment Orientations
+
+The application calculates **biomechanically meaningful segment orientations** that represent the direction and tilt of body segments relative to vertical.
+
+**Calculation Method:**
+- Uses `atan2(dx, dy)` to calculate orientation relative to vertical axis
+- Normalized to [-90°, +90°] range for readability
+- Represents tilt from vertical, which is more intuitive for human posture analysis
+
+**Angle Interpretation:**
+- **0°** = Vertical down (segment pointing straight down)
+- **+90°** = Horizontal right (segment pointing to the right)
+- **-90°** = Horizontal left (segment pointing to the left)
+- **±45°** = Diagonal orientation
+
+**Why This Approach:**
+- Previous implementation used `atan2(dy, dx)` which produced camera-coordinate angles
+- Camera coordinates resulted in confusing values like -155°, -147°, -43°, 107°
+- The new biomechanical approach provides intuitive angles that represent actual limb orientation
+- More stable values that are easier to interpret for human movement analysis
+
+**Tracked Segment Orientations:**
+- Left/Right Upper Arm: Orientation from shoulder to elbow
+- Left/Right Forearm: Orientation from elbow to wrist
+- Left/Right Thigh: Orientation from hip to knee
+- Left/Right Shin: Orientation from knee to ankle
+- Torso: Orientation from shoulder to hip
+
+**Coordinate System:**
+- MediaPipe uses normalized coordinates (0-1) for x and y
+- Y-axis increases downward (image coordinates)
+- Z-axis represents depth (negative = closer to camera)
+- All calculations account for this coordinate system
+
+### Position Data
+
+**Landmark Positions:**
+- Each landmark has `x`, `y`, `z` coordinates (normalized 0-1)
+- `x`: Horizontal position (0 = left, 1 = right)
+- `y`: Vertical position (0 = top, 1 = bottom)
+- `z`: Depth position (negative = closer, positive = farther)
+- `visibility`: Confidence score (0-1) indicating landmark detection quality
+
+**Visibility Thresholds:**
+- Default minimum visibility: 0.3 (30% confidence)
+- Angles/orientations return `null` if landmarks are not visible enough
+- Prevents calculations from unreliable pose data
 
 ## Browser Requirements
 

@@ -20,7 +20,7 @@ const Controls = ({ isModelLoaded, isRunning, onStart, onStop }) => {
       <button
         onClick={onStop}
         disabled={!isRunning}
-        className="control-button"
+        className="control-button stop-button"
       >
         Stop Camera
       </button>

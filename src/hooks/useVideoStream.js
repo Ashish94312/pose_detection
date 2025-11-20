@@ -15,7 +15,8 @@ export const useVideoStream = () => {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: VIDEO_CONFIG.width,
-          height: VIDEO_CONFIG.height
+          height: VIDEO_CONFIG.height,
+          frameRate: { ideal: VIDEO_CONFIG.frameRate ,min:30}
         }
       });
       

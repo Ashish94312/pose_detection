@@ -6,7 +6,6 @@ import './Info.css';
 const Info = () => {
   return (
     <div className="info">
-      <p>BlazePose GHUM with WebGPU</p>
     </div>
   );
 };

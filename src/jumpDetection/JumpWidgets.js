@@ -112,11 +112,11 @@ const JumpWidgets = () => {
  * Status Widget - Shows current jump state
  */
 const StatusWidget = ({ state, currentAirtime }) => {
-  const getStatusColor = () => {
-    if (state.isLanding) return '#ff6b6b';
-    if (state.isInAir) return '#4ecdc4';
-    if (state.isJumping) return '#95e1d3';
-    return '#ddd';
+  const getStatusClass = () => {
+    if (state.isLanding) return 'status-landing';
+    if (state.isInAir) return 'status-in-air';
+    if (state.isJumping) return 'status-jumping';
+    return 'status-ready';
   };
 
   const getStatusText = () => {
@@ -134,7 +134,7 @@ const StatusWidget = ({ state, currentAirtime }) => {
   return (
     <div className="widget status-widget">
       <div className="widget-title">Status</div>
-      <div className="status-indicator" style={{ backgroundColor: getStatusColor() }}>
+      <div className={`status-indicator ${getStatusClass()}`}>
         {getStatusText()}
       </div>
       <div className="widget-value">Jumps: {state.jumpCount}</div>
@@ -225,43 +225,44 @@ const JumpStatsWidget = ({ lastJump, lastLanding }) => {
   return (
     <div className="widget stats-widget">
       <div className="widget-title">Jump Metrics</div>
-      {lastJump && (
-        <div className="widget-stats">
-          <div className="stat-row">
-            <span className="stat-label">Jump #:</span>
-            <span className="stat-value">{lastJump.jumpNumber}</span>
-          </div>
-          <div className="stat-row">
-            <span className="stat-label">Takeoff:</span>
-            <span className="stat-value">{formatTime(lastJump.takeoffTime || lastJump.timestamp)}</span>
-          </div>
+      <div className="widget-stats">
+        <div className="stat-row highlight-stat">
+          <span className="stat-label">Airtime:</span>
+          <span className="stat-value">{lastLanding && lastLanding.airTime !== undefined ? formatAirtime(lastLanding.airTime) : '—'}</span>
         </div>
-      )}
-      {lastLanding && (
-        <div className="widget-stats">
-          <div className="stat-row">
-            <span className="stat-label">Airtime:</span>
-            <span className="stat-value">{formatAirtime(lastLanding.airTime)}</span>
-          </div>
-          <div className="stat-row">
-            <span className="stat-label">Height:</span>
-            <span className="stat-value">{(lastLanding.jumpHeight * 100).toFixed(1)} cm</span>
-          </div>
-          <div className="stat-row">
-            <span className="stat-label">Landing:</span>
-            <span className="stat-value">{formatTime(lastLanding.landingTime || lastLanding.timestamp)}</span>
-          </div>
-          {lastLanding.groundReactionForce && (
+        <div className="stat-row highlight-stat">
+          <span className="stat-label">Height:</span>
+          <span className="stat-value">{lastLanding && lastLanding.jumpHeight !== undefined && lastLanding.jumpHeight !== null ? `${(lastLanding.jumpHeight * 100).toFixed(1)} cm` : '—'}</span>
+        </div>
+        <div className="stat-row highlight-stat">
+          <span className="stat-label">Landing Time:</span>
+          <span className="stat-value">{lastLanding && lastLanding.landingTime ? formatTime(lastLanding.landingTime) : (lastLanding && lastLanding.timestamp ? formatTime(lastLanding.timestamp) : '—')}</span>
+        </div>
+        {lastJump && (
+          <>
             <div className="stat-row">
-              <span className="stat-label">Ground Force:</span>
-              <span className="stat-value">{Math.round(lastLanding.groundReactionForce)} N</span>
+              <span className="stat-label">Jump #:</span>
+              <span className="stat-value">{lastJump.jumpNumber}</span>
             </div>
-          )}
-        </div>
-      )}
-      {!lastJump && !lastLanding && (
-        <div className="widget-value">No jumps yet</div>
-      )}
+            <div className="stat-row">
+              <span className="stat-label">Takeoff:</span>
+              <span className="stat-value">{formatTime(lastJump.takeoffTime || lastJump.timestamp)}</span>
+            </div>
+          </>
+        )}
+        {lastLanding && lastLanding.groundReactionForce && (
+          <div className="stat-row">
+            <span className="stat-label">Ground Force:</span>
+            <span className="stat-value">{Math.round(lastLanding.groundReactionForce)} N</span>
+          </div>
+        )}
+        {!lastJump && !lastLanding && (
+          <div className="stat-row">
+            <span className="stat-label">Status:</span>
+            <span className="stat-value">No jumps yet</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
