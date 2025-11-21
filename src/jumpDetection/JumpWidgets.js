@@ -4,7 +4,6 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { flushSync } from 'react-dom';
 import { jumpDetector } from './jumpDetector';
 import { performanceProfiler } from '../utils/performanceProfiler';
 import './JumpWidgets.css';
@@ -44,8 +43,8 @@ const JumpWidgets = () => {
 
   useEffect(() => {
     // Helper function to update state from jumpDetector
-    // Use flushSync for immediate synchronous updates (bypasses React batching)
-    const updateStateFromDetector = (forceSync = false) => {
+    // Use async updates to avoid blocking the main thread and allow continuous jump detection
+    const updateStateFromDetector = () => {
       const state = jumpDetector.getState();
       const newState = {
         fsmState: state.fsmState,
@@ -68,28 +67,24 @@ const JumpWidgets = () => {
       const airtimeChanged = newAirtime !== currentAirtimeRef.current;
       
       if (stateChanged || airtimeChanged) {
-        if (forceSync) {
-          // Force synchronous update for critical state changes
-          flushSync(() => {
-            if (stateChanged) setJumpState(newState);
-            if (airtimeChanged) setCurrentAirtime(newAirtime);
-          });
-        } else {
-          // Normal update for non-critical changes
+        // Use requestAnimationFrame to schedule updates without blocking
+        // This allows jump detection to continue processing while UI updates
+        requestAnimationFrame(() => {
           if (stateChanged) setJumpState(newState);
           if (airtimeChanged) setCurrentAirtime(newAirtime);
-        }
+        });
       }
     };
 
-    // Set up callbacks with immediate synchronous updates
+    // Set up callbacks with async updates to avoid blocking jump detection
     jumpDetector.onJumpDetected = (data) => {
       const timerId = performanceProfiler.start('JumpWidgets.onJumpDetected', { jumpNumber: data.jumpNumber });
       
-      // Force immediate update for jump detection
-      flushSync(() => {
+      // Schedule async update to avoid blocking the main thread
+      // This allows the jump detector to continue processing the next jump immediately
+      requestAnimationFrame(() => {
         setLastJump(data);
-        updateStateFromDetector(true);
+        updateStateFromDetector();
       });
       
       if (timerId) performanceProfiler.end(timerId, { jumpNumber: data.jumpNumber });
@@ -129,9 +124,9 @@ const JumpWidgets = () => {
         jumpCount: state.jumpCount,
       };
       
-      // Force immediate synchronous update for landing (critical UI change)
-      // This bypasses React's automatic batching and updates immediately
-      flushSync(() => {
+      // Schedule async update to avoid blocking the main thread
+      // This allows the jump detector to continue processing the next jump immediately
+      requestAnimationFrame(() => {
         setLastLanding(data);
         setJumpState(newJumpState);
         setCurrentAirtime(state.currentAirtime || 0);
@@ -174,7 +169,7 @@ const JumpWidgets = () => {
     // Update state periodically to catch any missed updates
     // Reduced interval to 16ms (~60fps) for smoother updates
     const interval = setInterval(() => {
-      updateStateFromDetector(false);
+      updateStateFromDetector();
     }, 16); // ~60fps update rate
 
     return () => {

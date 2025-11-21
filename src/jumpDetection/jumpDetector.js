@@ -1168,10 +1168,19 @@ class JumpDetector {
     }
     
     // Acceleration from smoothed velocity
-    const previousSmoothedVelocity = this.velocityHistory.length > 1
-      ? this.velocityHistory[this.velocityHistory.length - 2]
-      : 0;
+    // IMPORTANT: velocityHistory is updated in calculateVerticalVelocity BEFORE calculateForce is called
+    // So when we're here: history[-1] = current frame (just added), history[-2] = previous frame
+    // We use history[-2] because we want to compare current (parameter) with previous (history[-2])
+    const previousSmoothedVelocity = this.velocityHistory.length >= 2
+      ? this.velocityHistory[this.velocityHistory.length - 2] // Previous frame's velocity
+      : (this.velocityHistory.length === 1 
+          ? this.velocityHistory[0] // If only one entry, use it (first frame)
+          : 0);
     
+    // Calculate acceleration: a = Δv / Δt
+    // verticalVelocity = current frame's smoothed velocity (from parameter)
+    // previousSmoothedVelocity = previous frame's smoothed velocity (from history)
+    // timeDelta = time difference between current and previous frame
     let rawAcceleration = (verticalVelocity - previousSmoothedVelocity) / timeDelta;
     rawAcceleration = Math.max(Math.min(rawAcceleration, 50), -50);
     
