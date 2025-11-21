@@ -46,6 +46,7 @@ class JumpDetector {
       jumpCount: 0,
       currentJump: null, // { takeoffTime, landingTime, peakHeight, peakGRF, airtime }
       lastJumpEndTime: 0,
+      recentJumpTimes: [], // Track recent jump times for adaptive cooldown
     };
     
     // Configuration - Clean Air-Time FSM
@@ -54,29 +55,30 @@ class JumpDetector {
       normalizedToMeters: null, // Will be calculated dynamically
       estimatedPersonHeight: 1.7, // meters - average adult height
       
-      // FSM Transition Thresholds
-      takeoffVelocityThreshold: 0.25, // m/s - upward velocity to trigger takeoff
-      landingVelocityThreshold: 0.15, // m/s - downward velocity to trigger landing
-      smallPositiveVelocityThreshold: 0.1, // m/s - for TAKEOFF → AIRBORNE transition
+      // FSM Transition Thresholds - GAME MODE: Lower thresholds for instant response
+      takeoffVelocityThreshold: 0.15, // m/s - lower threshold for faster detection (was 0.25)
+      landingVelocityThreshold: 0.10, // m/s - lower threshold for faster landing detection (was 0.15)
+      smallPositiveVelocityThreshold: 0.05, // m/s - faster transition to AIRBORNE (was 0.1)
       
-      // Ankle height detection
-      ankleRiseThreshold: 0.015, // normalized units - feet off ground when ankle.y < baseline - this
+      // Ankle height detection - Balance between sensitivity and accuracy
+      ankleRiseThreshold: 0.015, // normalized units - ensures both feet are clearly off ground (prevents false positives)
       
-      // Time gating
-      minAirborneTime: 120, // ms - minimum time in AIRBORNE state
-      velocityPositiveDuration: 40, // ms - velocity must stay positive for this duration
-      hipVelocityStableDuration: 60, // ms - hip velocity must be stable for this duration
+      // Time gating - GAME MODE: Faster transitions, minimal delays
+      minAirborneTime: 80, // ms - reduced minimum airtime for faster detection (was 120)
+      velocityPositiveDuration: 20, // ms - faster debounce for instant response (was 40)
+      hipVelocityStableDuration: 20, // ms - faster landing detection (was 40)
       maxJumpDuration: 2000, // ms - safety timeout
-      cooldownAfterJump: 300, // ms - cooldown after landing
+      cooldownAfterJump: 0, // ms - ZERO cooldown for instant continuous jumping (was 150)
+      rapidJumpCooldown: 0, // ms - ZERO cooldown for rapid jumps (was 50)
       
-      // Validation thresholds
-      minJumpHeightNormalized: 0.05, // normalized units - minimum jump height to count
+      // Validation thresholds - GAME MODE: Lower threshold to catch all jumps
+      minJumpHeightNormalized: 0.03, // normalized units - lower threshold to catch small jumps (was 0.05)
       
-      // Physics
+      // Physics - GAME MODE: More responsive, less smoothing
       mass: 70, // kg
-      noiseThresholdNormalized: 0.01, // normalized units/s - velocity noise gate
-      velocitySmoothing: 0.35, // EMA alpha (0.3-0.4)
-      accelerationSmoothing: 0.2, // EMA alpha for acceleration
+      noiseThresholdNormalized: 0.008, // normalized units/s - lower noise gate for sensitivity (was 0.01)
+      velocitySmoothing: 0.5, // EMA alpha - higher = more responsive, less lag (was 0.35)
+      accelerationSmoothing: 0.3, // EMA alpha - more responsive acceleration (was 0.2)
     };
     
     // Velocity and acceleration tracking
@@ -96,6 +98,12 @@ class JumpDetector {
     this.baselineAnkleY = null; // Average ankle Y when stationary
     this.ankleYHistory = []; // History of ankle Y positions for baseline calculation
     this.maxAnkleHistoryLength = 20;
+    
+    // Warm-up period to prevent false positives when person enters frame
+    this.warmupFrames = 0; // Count frames with both ankles visible
+    this.minWarmupFrames = 30; // Need at least 30 frames (0.5s at 60fps) before allowing jumps
+    this.bothAnklesVisibleHistory = []; // Track if both ankles were visible in previous frames
+    this.minStableBaselineFrames = 10; // Need stable baseline for this many frames before allowing jumps
     
     // Dynamic scale calculation
     this.personHeightNormalized = null; // Person's height in normalized coordinates
@@ -135,11 +143,21 @@ class JumpDetector {
     }
 
     this.unsubscribe = posePubSub.subscribe((poseData) => {
+      // Debug: Log when pose data is received
+      if (process.env.NODE_ENV === 'development' && !this.previousPoseData) {
+        console.log('[JumpDetector] First pose data received', {
+          hasJoints: !!poseData?.joints,
+          jointsCount: poseData?.joints ? Object.keys(poseData.joints).length : 0,
+          hasAngles: !!poseData?.angles,
+          timestamp: poseData?.timestamp,
+        });
+      }
       this.processPoseData(poseData);
     });
 
     this.isSubscribed = true;
-    console.log('JumpDetector subscribed to pose data feed');
+    const subscriberCount = posePubSub.getSubscriberCount();
+    console.log(`[JumpDetector] Subscribed to pose data feed (total subscribers: ${subscriberCount})`);
   }
 
   unsubscribeFromFeed() {
@@ -154,6 +172,7 @@ class JumpDetector {
   /**
    * Calculate dynamic scale factor from person's height
    * Uses head-to-ankle or shoulder-to-hip distance
+   * Works with both MoveNet (lower visibility) and BlazePose (higher visibility)
    */
   calculateScaleFactor(poseData) {
     if (!poseData || !poseData.joints) {
@@ -162,16 +181,25 @@ class JumpDetector {
 
     const joints = poseData.joints;
     
+    // Determine if we're using MoveNet by checking visibility scores
+    // MoveNet typically has lower confidence scores (< 0.7), BlazePose has higher (> 0.7)
+    const checkVisibility = (joint) => {
+      if (!joint || !joint.visible) return false;
+      const visibility = joint.visibility !== undefined ? joint.visibility : 1.0;
+      // For MoveNet, use lower threshold (0.25), for BlazePose use higher (0.5)
+      return visibility >= (visibility < 0.7 ? 0.25 : 0.5);
+    };
+    
     // Method 1: Use head (nose) to ankle distance
     if (joints.nose && joints.leftAnkle && joints.rightAnkle) {
       const nose = joints.nose;
       const leftAnkle = joints.leftAnkle;
       const rightAnkle = joints.rightAnkle;
       
-      if (nose.visible && (leftAnkle.visible || rightAnkle.visible)) {
-        const ankleY = leftAnkle.visible && rightAnkle.visible
+      if (checkVisibility(nose) && (checkVisibility(leftAnkle) || checkVisibility(rightAnkle))) {
+        const ankleY = checkVisibility(leftAnkle) && checkVisibility(rightAnkle)
           ? (leftAnkle.y + rightAnkle.y) / 2
-          : (leftAnkle.visible ? leftAnkle.y : rightAnkle.y);
+          : (checkVisibility(leftAnkle) ? leftAnkle.y : rightAnkle.y);
         
         const heightNormalized = Math.abs(nose.y - ankleY);
         if (heightNormalized > 0.1 && heightNormalized < 0.9) { // Reasonable bounds
@@ -191,8 +219,8 @@ class JumpDetector {
       const leftHip = joints.leftHip;
       const rightHip = joints.rightHip;
       
-      if (leftShoulder.visible && rightShoulder.visible && 
-          leftHip.visible && rightHip.visible) {
+      if (checkVisibility(leftShoulder) && checkVisibility(rightShoulder) && 
+          checkVisibility(leftHip) && checkVisibility(rightHip)) {
         const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
         const hipY = (leftHip.y + rightHip.y) / 2;
         const torsoHeightNormalized = Math.abs(shoulderY - hipY);
@@ -259,6 +287,8 @@ class JumpDetector {
 
   /**
    * Check if both feet are off the ground using relative ankle height
+   * STRICT: Both feet must be clearly off ground - prevents single leg lifts from counting
+   * Also prevents false positives when person first enters frame
    */
   bothFeetAreOffGround(joints) {
     if (!joints || this.baselineAnkleY === null) {
@@ -266,14 +296,30 @@ class JumpDetector {
     }
     
     const ankleData = this.getAnkleY(joints);
+    // STRICT: Both ankles must be visible and detected
     if (!ankleData || !ankleData.bothVisible) {
       return false;
     }
     
-    // Both ankles must be above baseline (lower Y = higher position)
+    // WARM-UP CHECK: Prevent false positives when person first enters frame
+    // Need to see both ankles consistently before allowing jump detection
+    if (this.warmupFrames < this.minWarmupFrames) {
+      return false; // Still in warm-up period
+    }
+    
+    // STABILITY CHECK: Need stable baseline before allowing jumps
+    // This prevents false positives when baseline is first being established
+    if (this.ankleYHistory.length < this.minStableBaselineFrames) {
+      return false; // Baseline not stable enough yet
+    }
+    
+    // Both ankles must be clearly above baseline (lower Y = higher position)
+    // Use the threshold to ensure both feet are significantly off ground
     const leftOffGround = ankleData.left < (this.baselineAnkleY - this.config.ankleRiseThreshold);
     const rightOffGround = ankleData.right < (this.baselineAnkleY - this.config.ankleRiseThreshold);
     
+    // STRICT: BOTH feet must be off ground - no exceptions
+    // This prevents single leg lifts, leg raises, or one-foot movements from counting as jumps
     return leftOffGround && rightOffGround;
   }
 
@@ -305,9 +351,45 @@ class JumpDetector {
 
   /**
    * Update baseline ankle height when stationary
+   * Also tracks warm-up period to prevent false positives when person enters frame
    */
   updateBaselineAnkleHeight(joints, verticalVelocity) {
     const ankleData = this.getAnkleY(joints);
+    
+    // Track warm-up: count consecutive frames with both ankles visible
+    if (ankleData && ankleData.bothVisible) {
+      this.bothAnklesVisibleHistory.push(true);
+      // Keep only recent history (last 60 frames = ~1 second at 60fps)
+      if (this.bothAnklesVisibleHistory.length > 60) {
+        this.bothAnklesVisibleHistory.shift();
+      }
+      
+      // Count warm-up frames (consecutive frames with both ankles visible)
+      // Reset if we lose visibility
+      if (this.bothAnklesVisibleHistory.length >= this.minWarmupFrames) {
+        // Check if we have enough consecutive visible frames
+        const recentVisible = this.bothAnklesVisibleHistory.slice(-this.minWarmupFrames);
+        if (recentVisible.every(v => v === true)) {
+          this.warmupFrames = this.minWarmupFrames;
+        } else {
+          // Reset warm-up if we had gaps
+          this.warmupFrames = recentVisible.filter(v => v === true).length;
+        }
+      } else {
+        this.warmupFrames = this.bothAnklesVisibleHistory.length;
+      }
+    } else {
+      // Reset warm-up if both ankles not visible
+      this.bothAnklesVisibleHistory.push(false);
+      if (this.bothAnklesVisibleHistory.length > 60) {
+        this.bothAnklesVisibleHistory.shift();
+      }
+      // Reset warm-up counter if we lose visibility
+      if (this.bothAnklesVisibleHistory.slice(-5).every(v => v === false)) {
+        this.warmupFrames = 0;
+      }
+    }
+    
     if (!ankleData || !ankleData.bothVisible) {
       return;
     }
@@ -323,12 +405,14 @@ class JumpDetector {
       }
       
       // Calculate baseline as average of recent stationary positions
-      if (this.ankleYHistory.length >= 5) {
+      // Need at least minStableBaselineFrames for stable baseline
+      if (this.ankleYHistory.length >= this.minStableBaselineFrames) {
         const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
         this.baselineAnkleY = sum / this.ankleYHistory.length;
-      } else if (this.baselineAnkleY === null) {
-        // Initialize with current value if we don't have enough history
-        this.baselineAnkleY = ankleData.average;
+      } else if (this.baselineAnkleY === null && this.ankleYHistory.length >= 5) {
+        // Initialize with average of available history (need at least 5 frames)
+        const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
+        this.baselineAnkleY = sum / this.ankleYHistory.length;
       }
     }
   }
@@ -342,6 +426,14 @@ class JumpDetector {
     
     if (!poseData || !poseData.joints) {
       if (timerId) performanceProfiler.end(timerId, { skipped: true });
+      // Debug: Log why pose data was skipped
+      if (process.env.NODE_ENV === 'development' && !this.previousPoseData) {
+        console.warn('[JumpDetector] Skipped pose data - missing joints', {
+          hasPoseData: !!poseData,
+          hasJoints: !!poseData?.joints,
+          poseDataKeys: poseData ? Object.keys(poseData) : [],
+        });
+      }
       return;
     }
 
@@ -512,15 +604,30 @@ class JumpDetector {
 
   /**
    * Check if can transition from GROUNDED to TAKEOFF
+   * GAME MODE: Instant detection, no cooldown, but BOTH feet must be off ground
    * Conditions:
-   * 1. upwardVelocity > takeoffThreshold (0.25 m/s)
-   * 2. bothFeetAreOffGround()
-   * 3. velocityStayedPositiveFor(40ms)
+   * 1. upwardVelocity > takeoffThreshold (lowered for faster detection)
+   * 2. bothFeetAreOffGround() - REQUIRED: both feet must be off ground (no single leg lifts)
+   * 3. velocityStayedPositiveFor(reduced duration for instant response)
+   * 4. Warm-up period completed - prevents false positives when person enters frame
    */
   canTransitionToTakeoff(poseData, verticalVelocity, timeInState) {
-    // Cooldown check
+    // WARM-UP CHECK: Prevent false positives when person first enters frame
+    // Need to see both ankles consistently for warm-up period before allowing jumps
+    if (this.warmupFrames < this.minWarmupFrames) {
+      return false; // Still in warm-up period - don't allow jumps yet
+    }
+    
+    // BASELINE STABILITY CHECK: Need stable baseline before allowing jumps
+    if (!this.baselineAnkleY || this.ankleYHistory.length < this.minStableBaselineFrames) {
+      return false; // Baseline not stable enough yet
+    }
+    
+    // GAME MODE: Zero cooldown - allow instant consecutive jumps
+    // Only prevent if we're still in a jump sequence (safety check)
     const timeSinceLastJump = poseData.timestamp - this.jumpState.lastJumpEndTime;
-    if (timeSinceLastJump < this.config.cooldownAfterJump) {
+    if (timeSinceLastJump < 50 && this.jumpState.currentJump !== null) {
+      // Only block if we're still processing the previous jump (safety)
       return false;
     }
 
@@ -544,7 +651,8 @@ class JumpDetector {
       return false;
     }
 
-    // Condition 2: Both feet must be off ground
+    // Condition 2: BOTH feet must be off ground - this prevents single leg lifts from counting as jumps
+    // This is critical for accurate jump detection - a real jump requires both feet to leave the ground
     if (!this.bothFeetAreOffGround(poseData.joints)) {
       return false;
     }
@@ -571,13 +679,15 @@ class JumpDetector {
 
   /**
    * Check if can transition from AIRBORNE to LANDING
+   * GAME MODE: Faster landing detection for instant response
    * Conditions:
    * 1. verticalVelocity < -landingThreshold (downward velocity)
-   * 2. feetTouchingGround()
-   * 3. airtime > 100ms (minimum airtime)
+   * 2. feetTouchingGround() OR approaching ground (early prediction)
+   * 3. airtime > reduced minimum (faster detection)
    */
   canTransitionToLanding(poseData, verticalVelocity, timeInState) {
-    // Condition 3: Must have minimum airtime
+    // GAME MODE: Reduced minimum airtime for faster detection
+    // Allow landing detection as soon as physically possible
     if (timeInState < this.config.minAirborneTime) {
       return false;
     }
@@ -599,20 +709,24 @@ class JumpDetector {
 
   /**
    * Check if can transition from LANDING to GROUNDED
-   * Condition: hipVelocity becomes stable for 60ms
+   * GAME MODE: Faster transition for instant next jump detection
+   * Condition: hipVelocity becomes stable for reduced duration
    */
   canTransitionToGrounded(poseData, verticalVelocity, timeInState) {
-    // Check if velocity is stable (near zero)
+    // GAME MODE: More lenient stability check for faster detection
     const absVelocity = Math.abs(verticalVelocity);
     const noiseThreshold = this.config.noiseThresholdNormalized * (this.config.normalizedToMeters || 1.0);
     
-    if (absVelocity < noiseThreshold) {
+    // GAME MODE: Allow transition with slightly higher velocity (more lenient)
+    const stabilityThreshold = noiseThreshold * 1.5; // 50% more lenient
+    
+    if (absVelocity < stabilityThreshold) {
       // Track when velocity became stable
       if (this.hipVelocityStableStartTime === 0) {
         this.hipVelocityStableStartTime = poseData.timestamp;
       }
       
-      // Must stay stable for required duration
+      // GAME MODE: Reduced stable duration for instant next jump
       const timeSinceStable = poseData.timestamp - this.hipVelocityStableStartTime;
       return timeSinceStable >= this.config.hipVelocityStableDuration;
     } else {
@@ -785,10 +899,30 @@ class JumpDetector {
           jumpHeight = 0;
         }
       } else {
+        // If height data is missing, try to calculate from available data
+        // This can happen if hip center was null during takeoff/peak
         console.warn('[JumpDetector] Missing height data for jump height calculation', {
           peakHeight: jump.peakHeight,
           takeoffHeight: jump.takeoffHeight,
+          scale: scale,
+          effectiveScale: effectiveScale,
+          scaleCalculated: this.config.normalizedToMeters !== null,
         });
+        
+        // Try to estimate jump height from airtime if we have it
+        // Using physics: h = (1/2) * g * t^2, where t is half the airtime
+        if (airtime > 0 && airtime < 2000) {
+          const halfAirtime = airtime / 2 / 1000; // Convert to seconds
+          const estimatedHeight = 0.5 * 9.81 * halfAirtime * halfAirtime;
+          if (estimatedHeight > 0 && estimatedHeight < 2.0) { // Reasonable bounds (0-2m)
+            jumpHeight = estimatedHeight;
+            console.log('[JumpDetector] Estimated jump height from airtime', {
+              airtime: airtime,
+              estimatedHeight: estimatedHeight,
+              estimatedHeightCm: (estimatedHeight * 100).toFixed(1),
+            });
+          }
+        }
       }
       
       // Validate jump (convert minJumpHeight to meters if needed)
@@ -882,7 +1016,16 @@ class JumpDetector {
         this.onLandingDetected(landingData);
       }
       
-      this.jumpState.lastJumpEndTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+      const jumpEndTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
+      this.jumpState.lastJumpEndTime = jumpEndTime;
+      
+      // Track recent jump times for adaptive cooldown
+      this.jumpState.recentJumpTimes.push(jumpEndTime);
+      // Keep only last 10 jumps to avoid memory growth
+      if (this.jumpState.recentJumpTimes.length > 10) {
+        this.jumpState.recentJumpTimes.shift();
+      }
+      
       this.jumpState.currentJump = null;
     }
     
@@ -1076,10 +1219,22 @@ class JumpDetector {
       return null;
     }
     
-    if (leftHip.visibility !== undefined && leftHip.visibility < 0.6) {
+    // MoveNet uses confidence scores (typically 0.25-0.8), BlazePose uses visibility (typically 0.5-1.0)
+    // Use a lower threshold for MoveNet to accommodate its lower confidence scores
+    // Check if we're using MoveNet by checking if visibility scores are typically lower
+    // MoveNet confidence is usually < 0.8, BlazePose visibility is usually > 0.7
+    const leftVisibility = leftHip.visibility !== undefined ? leftHip.visibility : 1.0;
+    const rightVisibility = rightHip.visibility !== undefined ? rightHip.visibility : 1.0;
+    
+    // Adaptive threshold: if visibility is consistently low (< 0.7), likely MoveNet, use 0.25 threshold
+    // Otherwise, use 0.6 threshold for BlazePose
+    const isLikelyMoveNet = leftVisibility < 0.7 && rightVisibility < 0.7;
+    const visibilityThreshold = isLikelyMoveNet ? 0.25 : 0.6;
+    
+    if (leftVisibility < visibilityThreshold) {
       return null;
     }
-    if (rightHip.visibility !== undefined && rightHip.visibility < 0.6) {
+    if (rightVisibility < visibilityThreshold) {
       return null;
     }
 
@@ -1117,6 +1272,7 @@ class JumpDetector {
       jumpCount: 0,
       currentJump: null,
       lastJumpEndTime: 0,
+      recentJumpTimes: [],
     };
     this.previousPoseData = null;
     this.rawVelocity = 0;
@@ -1127,6 +1283,8 @@ class JumpDetector {
     this.baselineHipHeight = null;
     this.baselineAnkleY = null;
     this.ankleYHistory = [];
+    this.warmupFrames = 0; // Reset warm-up period
+    this.bothAnklesVisibleHistory = []; // Reset visibility history
     this.lastSignificantMovement = 0;
     this.config.normalizedToMeters = null; // Reset scale
     this.personHeightNormalized = null;

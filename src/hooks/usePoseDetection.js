@@ -12,6 +12,8 @@ import { performanceProfiler } from '../utils/performanceProfiler';
  */
 export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState('');
   const [fps, setFps] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState(null);
@@ -73,6 +75,8 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
       try {
         setError(null);
         setIsModelLoaded(false);
+        setIsLoading(true);
+        setLoadingProgress('Initializing model...');
         
         // Clean up previous model state completely
         if (poseModelRef.current) {
@@ -108,14 +112,28 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
         modelMetadataRef.current = modelMetadata;
         
         // Create model instance
-        const model = createPoseModel(currentModelType, config);
+        // Use worker for BlazePose if configured (default: true)
+        const useWorker = currentModelType === 'blazepose' && (config.useWorker !== false);
+        
+        if (currentModelType === 'movenet') {
+          setLoadingProgress('Loading MoveNet from TensorFlow Hub...');
+        } else {
+          setLoadingProgress('Loading BlazePose model...');
+        }
+        
+        const model = createPoseModel(currentModelType, config, useWorker);
         
         // Load model
+        setLoadingProgress('Downloading model files...');
         await model.load();
+        
+        setLoadingProgress('Model loaded successfully!');
 
         if (isMounted) {
           poseModelRef.current = model;
           setIsModelLoaded(true);
+          setIsLoading(false);
+          setLoadingProgress('');
           setCurrentModelType(currentModelType);
         }
       } catch (err) {
@@ -123,9 +141,11 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
         if (isMounted) {
           const errorMessage = currentModelType === 'movenet'
             ? `Failed to load MoveNet model: ${err.message || 'Unknown error'}. Make sure you have internet connection.`
-            : `Failed to load BlazePose model: ${err.message || 'Unknown error'}. Make sure WebGPU is supported in your browser.`;
+            : `Failed to load BlazePose model: ${err.message || 'Unknown error'}. Make sure WebGPU is supported and the worker file is accessible.`;
           setError(errorMessage);
           setIsModelLoaded(false);
+          setIsLoading(false);
+          setLoadingProgress('');
         }
       }
     };
@@ -196,9 +216,13 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
     if (videoTime !== lastVideoTimeRef.current) {
       lastVideoTimeRef.current = videoTime;
       
+      // Process EVERY frame - no skipping for maximum jump detection accuracy
+      // With poseDetectionInterval = 1, we process every single frame
       const detectionInterval = PERFORMANCE_CONFIG.poseDetectionInterval;
       const shouldRunDetection = frameSkipCounterRef.current % detectionInterval === 0;
       
+      // With interval = 1, shouldRunDetection will always be true (every frame)
+      // This ensures maximum responsiveness and no missed jumps
       frameSkipCounterRef.current++;
       
       // Use model-specific handler based on current model type
@@ -363,6 +387,8 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
 
   return {
     isModelLoaded,
+    isLoading,
+    loadingProgress,
     fps,
     isRunning,
     setIsRunning,

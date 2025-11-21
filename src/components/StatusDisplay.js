@@ -4,16 +4,18 @@ import './StatusDisplay.css';
 /**
  * StatusDisplay component - Shows model status, FPS, and video resolution
  * @param {boolean} isModelLoaded - Whether the model is loaded
+ * @param {boolean} isLoading - Whether the model is currently loading
+ * @param {string} loadingProgress - Loading progress message
  * @param {number} fps - Current FPS value
  * @param {Object} actualResolution - Actual video resolution {width, height}
  */
-const StatusDisplay = memo(({ isModelLoaded, fps, actualResolution }) => {
+const StatusDisplay = memo(({ isModelLoaded, isLoading, loadingProgress, fps, actualResolution }) => {
   return (
     <div className="status-container">
       <div className="status-item">
         <span className="status-label">Status:</span>
         <span className={isModelLoaded ? 'status-success' : 'status-loading'}>
-          {isModelLoaded ? 'Ready' : 'Loading...'}
+          {isModelLoaded ? 'Ready' : (isLoading ? (loadingProgress || 'Loading...') : 'Not Loaded')}
         </span>
       </div>
       <div className="status-item">

@@ -228,19 +228,52 @@ const processLandmarks = (
     });
   }
 
-  // Create and publish pose data (only on detection frames)
-  if (shouldRunDetection && smoothedAngles && smoothedOrientations) {
-    const poseData = createPoseData(
-      landmarksForCalculations,
-      smoothedAngles,
-      smoothedOrientations,
-      performance.now(),
-      currentFps || 0,
-      modelMetadataRef.current
-    );
+  // Create and publish pose data
+  // For jump detection: publish on every frame with landmarks (even if detection was skipped)
+  // This ensures continuous jump detection even when frames are skipped for performance
+  // For angles/orientations: only publish on detection frames (to avoid unnecessary calculations)
+  const hasLandmarks = rawLandmarks && rawLandmarks.length > 0;
+  const shouldPublishForAngles = shouldRunDetection && smoothedAngles && smoothedOrientations;
+  
+  // Always publish if we have landmarks (for jump detection), or if we have angles (for angle display)
+  // This ensures jump detection receives continuous updates even when pose detection frames are skipped
+  if (hasLandmarks || shouldPublishForAngles) {
+    // Use smoothed landmarks for calculations if available, otherwise use raw landmarks
+    // This ensures jump detection gets data even when angle calculations are skipped
+    const landmarksToUse = landmarksForCalculations || rawLandmarks;
+    
+    if (landmarksToUse && landmarksToUse.length > 0) {
+      // Always use current timestamp (performance.now()) even for cached landmarks
+      // This ensures the jump detector sees continuous time progression
+      const poseData = createPoseData(
+        landmarksToUse,
+        smoothedAngles || null,
+        smoothedOrientations || null,
+        performance.now(), // Always use current time, even for cached landmarks
+        currentFps || 0,
+        modelMetadataRef.current
+      );
 
-    if (poseData) {
-      posePubSub.publish(poseData);
+      if (poseData) {
+        posePubSub.publish(poseData);
+        // Debug: Log pose data publication for jump detection troubleshooting
+        if (process.env.NODE_ENV === 'development') {
+          const subscriberCount = posePubSub.getSubscriberCount();
+          if (subscriberCount === 0) {
+            console.warn('[modelHandlers] Pose data published but no subscribers (jump detector may not be subscribed)');
+          }
+        }
+      } else {
+        // Debug: Log why pose data wasn't created
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('[modelHandlers] Failed to create pose data', {
+            landmarksCount: landmarksToUse?.length || 0,
+            hasAngles: !!smoothedAngles,
+            hasOrientations: !!smoothedOrientations,
+            shouldRunDetection,
+          });
+        }
+      }
     }
   }
 

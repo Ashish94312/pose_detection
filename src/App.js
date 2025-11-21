@@ -21,6 +21,8 @@ function App() {
 
   const {
     isModelLoaded,
+    isLoading,
+    loadingProgress,
     fps,
     isRunning,
     setIsRunning,
@@ -146,7 +148,9 @@ function App() {
                   isRunning={isRunning}
                 />
                 <StatusDisplay 
-                  isModelLoaded={isModelLoaded} 
+                  isModelLoaded={isModelLoaded}
+                  isLoading={isLoading}
+                  loadingProgress={loadingProgress}
                   fps={fps} 
                   actualResolution={actualResolution}
                 />

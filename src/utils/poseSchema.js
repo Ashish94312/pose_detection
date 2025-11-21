@@ -6,7 +6,7 @@
 /**
  * Check if we have minimum valid data to publish
  * @param {Array} landmarks - Pose landmarks
- * @param {Object} angles - Joint angles
+ * @param {Object} angles - Joint angles (optional)
  * @returns {boolean} True if we have enough valid data
  */
 const hasValidPoseData = (landmarks, angles) => {
@@ -23,10 +23,14 @@ const hasValidPoseData = (landmarks, angles) => {
            landmark.visibility >= 0.5;
   });
   
-  // Also check if we have at least some valid angles
+  // If we have key landmarks, that's enough (jump detector only needs joints)
+  // Angles are optional - they're nice to have but not required
+  if (hasKeyLandmarks) return true;
+  
+  // Fallback: check if we have valid angles (for backward compatibility)
   const hasValidAngles = angles && Object.values(angles).some(angle => angle !== null);
   
-  return hasKeyLandmarks || hasValidAngles;
+  return hasValidAngles;
 };
 
 /**

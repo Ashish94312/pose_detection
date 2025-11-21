@@ -20,6 +20,10 @@ export const BLAZEPOSE_CONFIG = {
   minPoseDetectionConfidence: 0.85, // Very high = only accept highly confident detections
   minPosePresenceConfidence: 0.9, // Very high = stable tracking, no flickering
   minTrackingConfidence: 0.9, // Very high = smooth tracking between frames, zero jumps
+  // Web Worker configuration
+  // Note: Worker support requires webpack configuration to bundle MediaPipe
+  // For now, default to false (main thread) until proper worker setup is configured
+  useWorker: false, // Set to true to use Web Worker (requires webpack worker-loader or similar)
 };
 
 // MoveNet Lightning Configuration (TensorFlow.js)
@@ -80,21 +84,23 @@ export const getResolutionConfig = (label) => {
 };
 
 export const PERFORMANCE_CONFIG = {
+  // GAME MODE: Process EVERY frame - no skipping for maximum jump detection accuracy
   // Frame skipping: process pose detection every N frames (1 = every frame, 2 = every other frame)
   // Higher values = better FPS but less frequent pose updates
-  poseDetectionInterval: 1, // Lite model can handle every frame
-  // Enable adaptive frame skipping to maintain minimum FPS
-  enableAdaptiveFrameSkipping: true,
-  // Minimum FPS threshold - system will adapt if FPS drops below this
-  minFPS: 60,
+  poseDetectionInterval: 1, // Process EVERY frame - no skipping
+  // DISABLED: Adaptive frame skipping - we want to process every frame
+  enableAdaptiveFrameSkipping: false, // Disabled to process all frames
+  // GAME MODE: Accept lower FPS to ensure every frame is processed
+  // Minimum FPS threshold - system will adapt if FPS drops below this (but we disabled adaptive skipping)
+  minFPS: 30, // Accept lower FPS to prioritize processing every frame
   // Target FPS
   targetFPS: 60,
-  // FPS check interval (ms) - how often to check and adapt
+  // FPS check interval (ms) - how often to check and adapt (not used when adaptive skipping is disabled)
   fpsCheckInterval: 2000,
-  // Maximum frame skip interval (safety limit)
-  maxFrameSkipInterval: 3,
-  // Aggressive mode: if FPS drops below this, skip more aggressively
-  aggressiveThreshold: 40,
+  // Maximum frame skip interval (safety limit) - not used when adaptive skipping is disabled
+  maxFrameSkipInterval: 1, // Set to 1 (no skipping) since we disabled adaptive skipping
+  // Aggressive mode: if FPS drops below this, skip more aggressively (not used when disabled)
+  aggressiveThreshold: 20, // Not used but kept for reference
 };
 
 export const FPS_CONFIG = {

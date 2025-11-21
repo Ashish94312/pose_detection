@@ -5,6 +5,7 @@
 
 import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import * as tf from '@tensorflow/tfjs';
+import { BlazePoseWorkerManager } from '../workers/workerManager';
 
 /**
  * Base class for pose detection models
@@ -30,7 +31,7 @@ class BasePoseModel {
 }
 
 /**
- * BlazePose model implementation (MediaPipe)
+ * BlazePose model implementation (MediaPipe) - Main thread version
  */
 class BlazePoseModel extends BasePoseModel {
   async load() {
@@ -84,12 +85,66 @@ class BlazePoseModel extends BasePoseModel {
 }
 
 /**
+ * BlazePose model implementation using Web Worker
+ */
+class BlazePoseWorkerModel extends BasePoseModel {
+  constructor(config) {
+    super(config);
+    this.workerManager = new BlazePoseWorkerManager();
+  }
+
+  async load() {
+    try {
+      await this.workerManager.initialize(this.config);
+      this.isLoaded = true;
+      return true;
+    } catch (error) {
+      console.error('Error loading BlazePose worker model:', error);
+      throw error;
+    }
+  }
+
+  async detect(video, timestamp) {
+    if (!this.isLoaded || !video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      return null;
+    }
+
+    try {
+      return await this.workerManager.detect(video, timestamp || performance.now());
+    } catch (error) {
+      console.error('Error running BlazePose worker detection:', error);
+      return null;
+    }
+  }
+
+  dispose() {
+    if (this.workerManager) {
+      this.workerManager.dispose();
+    }
+  }
+}
+
+/**
  * MoveNet Lightning model implementation (TensorFlow.js)
  */
 class MoveNetModel extends BasePoseModel {
   async load() {
     try {
-      const model = await tf.loadGraphModel(this.config.modelUrl, { fromTFHub: true });
+      console.log('Loading MoveNet model from TensorFlow Hub...');
+      const loadStartTime = performance.now();
+      
+      // Enable model caching for faster subsequent loads
+      const model = await tf.loadGraphModel(this.config.modelUrl, { 
+        fromTFHub: true,
+        // Enable caching to speed up subsequent loads
+        requestInit: {
+          cache: 'force-cache', // Use browser cache if available
+        },
+      });
+      
+      const loadTime = performance.now() - loadStartTime;
+      console.log(`MoveNet model loaded in ${loadTime.toFixed(0)}ms`);
+      
       this.model = model;
       this.isLoaded = true;
       return true;
@@ -159,12 +214,14 @@ class MoveNetModel extends BasePoseModel {
  * Factory function to create pose detection models
  * @param {string} modelType - 'blazepose' or 'movenet'
  * @param {Object} config - Model-specific configuration
+ * @param {boolean} useWorker - Whether to use Web Worker for BlazePose (default: true)
  * @returns {BasePoseModel} Instance of the requested model
  */
-export const createPoseModel = (modelType, config) => {
+export const createPoseModel = (modelType, config, useWorker = true) => {
   switch (modelType.toLowerCase()) {
     case 'blazepose':
-      return new BlazePoseModel(config);
+      // Use worker by default for BlazePose to avoid blocking main thread
+      return useWorker ? new BlazePoseWorkerModel(config) : new BlazePoseModel(config);
     case 'movenet':
     case 'movenet-lightning':
       return new MoveNetModel(config);
