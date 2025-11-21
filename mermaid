@@ -1,0 +1,479 @@
+flowchart TD
+
+%% ===================================================================
+%% CONFIG MODULE
+%% ===================================================================
+
+subgraph CONFIG_MODULE[CONFIG MODULE]
+    direction TB
+
+    PC1[POSE CONFIG]
+    VC1[VIDEO CONFIG]
+    FC1[FPS CONFIG]
+    SC1[SMOOTHING CONFIG]
+
+    PC1 --> PC_MODEL[modelAssetPath]
+    PC1 --> PC_WASM[wasmPath]
+    PC1 --> PC_DEL[GPU delegate]
+    PC1 --> PC_MODE[runningMode VIDEO]
+    PC1 --> PC_THRESH[confidence thresholds]
+
+    VC1 --> VC_W[width]
+    VC1 --> VC_H[height]
+
+    FC1 --> FC_INT[1000ms interval]
+
+    SC1 --> SC_METHOD[smoothing method]
+    SC1 --> SC_ALPHA[smoothing alpha]
+    SC1 --> SC_LSM[landmark smoothing]
+    SC1 --> SC_EN[enabled true/false]
+
+    CFG_PSEUDO["Pseudocode:
+    POSE_CONFIG:
+        define model path
+        define wasm path
+        GPU delegate
+        confidence thresholds
+
+    VIDEO_CONFIG:
+        width, height
+
+    FPS_CONFIG:
+        update interval
+
+    SMOOTHING_CONFIG:
+        method (ema/kalman)
+        alpha values
+        enable/disable
+    "]
+end
+
+
+%% ===================================================================
+%% APP FLOW
+%% ===================================================================
+
+subgraph APP_FLOW[APP FLOW]
+    direction TB
+
+    A1[App Mounted]
+    A2[Init useVideoStream]
+    A3[Init usePoseDetection]
+    A4[Setup Error Boundary]
+    UI[Render Initial UI]
+
+    A1 --> A2 --> A3 --> A4 --> UI
+
+    U1[Click Start]
+    U2[Call startStream]
+    U3{Stream OK?}
+    U4[Set isRunning]
+    U5{Metadata Loaded?}
+    U6[Call startInferenceLoop]
+    U7[Render Active UI]
+
+    UI --> U1 --> U2 --> U3
+    U3 -- No --> AERR[Show Error]
+    U3 -- Yes --> U4 --> U5
+    U5 -- No --> W1[Wait metadata] --> U6
+    U5 -- Yes --> U6 --> U7
+
+    %% STOP
+    S1[Click Stop]
+    S2[Stop Inference Loop]
+    S3[Call stopStream]
+    S4[Unset isRunning]
+    U7 --> S1 --> S2 --> S3 --> S4 --> U7
+
+    APP_PSEUDO["Pseudocode:
+    onMount():
+        init video hook
+        init pose hook
+        setup error boundary
+
+    onStart():
+        startStream()
+        wait metadata
+        startInferenceLoop()
+        set isRunning
+
+    onStop():
+        stopInferenceLoop
+        stopStream
+        unset running
+
+    onUnmount():
+        if streaming -> stop everything
+    "]
+end
+
+
+%% ===================================================================
+%% VIDEO STREAM HOOK
+%% ===================================================================
+
+subgraph VIDEO_STREAM_HOOK[VIDEO STREAM HOOK]
+    direction TB
+
+    VS_Init[Hook Ready]
+
+    VS_Start[startStream Called]
+    VS1[Request Camera]
+    VS2{Permission Granted?}
+    VS3[Assign videoRef.srcObject]
+    VS4{Metadata Ready?}
+    VS5[Call video.play]
+    VS6[Add Metadata Listener]
+    VS7{Playback OK?}
+    VS8[Set isStreaming]
+    VS9[Resolve True]
+
+    VS_Start --> VS1 --> VS2
+    VS2 -- No --> VSERR[Webcam Error]
+    VS2 -- Yes --> VS3 --> VS4
+    VS4 -- Yes --> VS5
+    VS4 -- No --> VS6 --> VS5
+    VS5 --> VS7
+    VS7 -- No --> VSFAIL[Playback Failed]
+    VS7 -- Yes --> VS8 --> VS9
+
+    %% STOP STREAM
+    VS_Stop[stopStream Called]
+    VSS1{Has srcObject?}
+    VSS1 -- No --> VSS5[Set isStreaming false]
+    VSS1 -- Yes --> VSS2[Get Tracks] --> VSS3[Stop Tracks] --> VSS4[Clear srcObject] --> VSS5
+
+    VS_PSEUDO["Pseudocode:
+    startStream():
+        request getUserMedia(width,height)
+        attach stream to videoRef
+        if metadata ready -> play()
+        else -> wait metadata then play()
+        if play OK -> set isStreaming
+
+    stopStream():
+        stop all tracks
+        clear videoRef.srcObject
+        set isStreaming false
+    "]
+end
+
+
+%% ===================================================================
+%% SMOOTHING MODULE
+%% ===================================================================
+
+subgraph SMOOTHING_MODULE[Smoothing Module]
+    direction TB
+
+    SM_Init[Loaded]
+
+    LS1[Landmark Smoother]
+    LS_Out[Smoothed Landmarks]
+
+    AS1[Angle Smoother]
+    AS_Out[Smoothed Angles]
+
+    SM_PSEUDO["Pseudocode:
+    EMA:
+        smooth = a*v + (1-a)*prev
+
+    Kalman:
+        predict
+        compute gain
+        update state
+
+    LandmarkSmoother:
+        smooth (x,y,z) per landmark
+
+    AngleSmoother:
+        apply filter per angle
+    "]
+end
+
+
+%% ===================================================================
+%% ANGLE ORIENTATION MODULE
+%% ===================================================================
+
+subgraph ANGLE_ORIENTATION_MODULE[Angles & Orientations]
+    direction TB
+
+    ALLA1[Calculate All Angles]
+    ALLA_Out[Angle Outputs]
+
+    ALLO1[Calculate All Orientations]
+    ALLO_Out[Orientation Outputs]
+
+    AO_PSEUDO["Pseudocode:
+    calculateAllAngles():
+        computeAngle(hip,shoulder,elbow)
+        computeAngle(shoulder,elbow,wrist)
+        computeAngle(hip,knee,ankle)
+        ...
+
+    calculateSegmentOrientation():
+        vector direction
+        normalize
+        compute XY angle
+
+    validate visibility & min distance
+    "]
+end
+
+
+%% ===================================================================
+%% POSE DETECTION HOOK
+%% ===================================================================
+
+subgraph POSE_DETECTION_HOOK[POSE DETECTION HOOK]
+    direction TB
+
+    PD_Init[Hook Ready]
+
+    PD1[Init Smoothers]
+    PD2[Load WASM]
+    PD3[Create Landmarker]
+    PD4{Landmarker OK?}
+    PD5[Model Loaded]
+
+    PD_Init --> PD1 --> PD2 --> PD3 --> PD4
+    PD4 -- Yes --> PD5
+    PD4 -- No --> PDERR[Load Error]
+
+    PD_Start[startInferenceLoop]
+    PD6[Setup Canvas]
+    PD7{Canvas Ready?}
+    PD8[Start RAF Loop]
+
+    PD_Start --> PD6 --> PD7
+    PD7 -- No --> PDRetry[Retry] --> PD6
+    PD7 -- Yes --> PD8
+
+    PD8 --> RF1[Draw Frame] --> RF2[Update FPS] --> RF3[Run Inference] --> RF4[Next RAF] --> PD8
+
+    %% ==== INFERENCE PATH ====
+    I1{Valid Frame?}
+    RF3 --> I1
+    I1 -- No --> IEND[Reset State]
+    I1 -- Yes --> I2[Detect Pose]
+
+    I2 --> I3{Has Landmarks?}
+    I3 -- No --> IEND
+    I3 -- Yes --> LS1
+
+    LS1 --> LS_Out --> I4[Smooth Landmarks]
+
+    %% ANGLE
+    I4 --> ALLA1
+    ALLA1 --> ALLA_Out --> AS1
+    AS1 --> AS_Out --> I5[Angles Ready]
+
+    %% ORIENT
+    I4 --> ALLO1
+    ALLO1 --> ALLO_Out --> I6[Orient Ready]
+
+    I5 --> COMB_A
+    I6 --> COMB_O
+
+    COMB_A --> I7
+    COMB_O --> I7
+
+    I7[Create PoseData]
+    I7 --> I8{Valid?}
+    I8 -- Yes --> I9[Publish Pose] --> I10[Draw Skeleton]
+    I8 -- No --> IEND
+
+    PD_PSEUDO["Pseudocode:
+    init:
+        create smoothers
+        load wasm
+        create landmarker
+
+    RAF loop:
+        draw video frame
+        update FPS
+        run inference
+
+    inference:
+        detect landmarks
+        smooth landmarks
+        compute angles
+        smooth angles
+        compute orientations
+        create poseData
+        publish + draw
+
+    stop:
+        stop RAF
+        reset smoother state
+    "]
+end
+
+%% ===================================================================
+%% JUMP DETECTION MODULE (FSM)
+%% ===================================================================
+
+subgraph JUMP_DETECTION_MODULE[Jump Detection Module]
+    direction TB
+
+    JD_Init[JumpDetector Initialized]
+
+    %% INPUT
+    JD_Sub[Subscribe to posePubSub]
+    JDI1[Receive poseData]
+
+    %% SCALE CALCULATION
+    SCALE1[Calculate Scale Factor]
+    SCALE2{Scale OK?}
+    SCALE3[EMA Smooth Scale]
+    SCALEFALL[Fallback Scale ~0.4 normalized]
+
+    JD_Sub --> JDI1 --> SCALE1 --> SCALE2
+    SCALE2 -- Yes --> SCALE3
+    SCALE2 -- No --> SCALEFALL
+
+    %% VELOCITY
+    VEL1[Hip Center Extraction]
+    VEL2[deltaY = prevHip.y - currentHip.y]
+    VEL3[velocity = deltaY / dt]
+    VEL4[Convert normalized → m/s]
+    VEL5[EMA Velocity]
+    VEL6[Store Velocity History]
+
+    SCALE3 --> VEL1
+    SCALEFALL --> VEL1
+
+    VEL1 --> VEL2 --> VEL3 --> VEL4 --> VEL5 --> VEL6
+
+    %% FORCE
+    F1[Acceleration dv/dt]
+    F2[EMA Acceleration]
+    F3[Force = m * a]
+    F4[Total Force = weight + netForce]
+    FOUT[Publish Force]
+
+    VEL6 --> F1 --> F2 --> F3 --> F4 --> FOUT
+
+    %% FSM CORE
+    FSM1{State: GROUNDED}
+    FSM2{State: TAKEOFF}
+    FSM3{State: AIRBORNE}
+    FSM4{State: LANDING}
+
+    %% TRANSITIONS
+    T1[Upward Velocity + Debounce + Bent Knees]
+    T2[Velocity Peak → AIRBORNE]
+    T3[Downward Velocity + Min Airtime]
+    T4[GRF < 1.1 BW → GROUNDED]
+
+    JDI1 --> FSM1
+    VEL6 --> FSM1
+    F1 --> FSM1
+
+    %% GROUNDED → TAKEOFF
+    FSM1 -->|Upward Vel OK| T1 --> FSM2
+
+    %% TAKEOFF → AIRBORNE
+    FSM2 -->|Velocity Peak| T2 --> FSM3
+
+    %% AIRBORNE → LANDING
+    FSM3 -->|Downward Vel OK| T3 --> FSM4
+
+    %% LANDING → GROUNDED
+    FSM4 -->|GRF stable| T4 --> FSM1
+
+    %% JUMP METRICS
+    JM1[Record takeoffHeight]
+    JM2[Track peakHeight]
+    JM3[Record landingTime]
+    JM4[Compute airtime]
+    JM5[Compute jumpHeight]
+
+    FSM2 --> JM1
+    FSM3 --> JM2
+    FSM4 --> JM3 --> JM4 --> JM5
+
+    JD_PSEUDO["Pseudocode:
+    onPoseData():
+        update scale
+        compute velocity
+        smooth velocity
+        compute acceleration
+        compute force
+        run FSM:
+            GROUNDED -> TAKEOFF
+            TAKEOFF -> AIRBORNE
+            AIRBORNE -> LANDING
+            LANDING -> GROUNDED
+        update jump metrics
+    "]
+end
+
+I9 --> JD_Sub
+
+
+subgraph ANGLE_MATH[Angle & Orientation Math]
+    direction TB
+
+    %% ============= ANGLE =============
+    AM1[Pick joints p1-p2-p3]
+    AM2[Check visibility]
+    AM3[Check min distance]
+    AM4[Compute vectors v1 & v2]
+    AM5[Compute dot product]
+    AM6[Compute magnitudes]
+    AM7[Compute cos theta]
+    AM8[Clamp range]
+    AM9[Convert to degrees]
+
+    AM1 --> AM2 --> AM3 --> AM4 --> AM5 --> AM6 --> AM7 --> AM8 --> AM9
+
+    %% ============= ORIENTATION =============
+    OR1[Pick segment p1→p2]
+    OR2[Compute direction vector]
+    OR3[Normalize vector]
+    OR4[Compute horizontal angle]
+    OR5[Normalize angle range]
+
+    OR1 --> OR2 --> OR3 --> OR4 --> OR5
+
+    ANGLE_MATH_PSEUDO["Pseudocode:
+    calculateAngle(p1,p2,p3):
+        v1 = p1 - p2
+        v2 = p3 - p2
+        dot = v1·v2
+        mags = |v1|, |v2|
+        cos = dot/(mags)
+        angle = acos(cos)
+        return deg(angle)
+
+    calculateOrientation(p1,p2):
+        dir = normalize(p2 - p1)
+        angle = atan2(dx, dy)
+        return angle in -90..+90
+    "]
+end
+
+
+
+%% ===================================================================
+%% CONFIG CONNECTIONS
+%% ===================================================================
+
+VC1 -.-> |Width/Height| VS1
+PC1 -.-> |Model/WASM/Delegate| PD1
+SC1 -.-> |Smoothing Params| PD1
+FC1 -.-> |FPS Interval| RF2
+
+
+%% APP → HOOKS CONNECTIONS
+A2 --> VS_Init
+U2 --> VS_Start
+S3 --> VS_Stop
+
+A3 --> PD_Init
+U6 --> PD_Start
+S2 --> PD_Stop
+
+classDef hidden width:0px;height:0px;opacity:0;

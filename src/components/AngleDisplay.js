@@ -1,3 +1,4 @@
+import { useState, memo } from 'react';
 import './AngleDisplay.css';
 
 /**
@@ -5,7 +6,10 @@ import './AngleDisplay.css';
  * @param {Object} angles - Joint angles object
  * @param {Object} orientations - Segment orientations object
  */
-const AngleDisplay = ({ angles, orientations }) => {
+const AngleDisplay = memo(({ angles, orientations }) => {
+  const [showJointAngles, setShowJointAngles] = useState(true);
+  const [showOrientations, setShowOrientations] = useState(true);
+
   if (!angles && !orientations) {
     return null;
   }
@@ -22,7 +26,33 @@ const AngleDisplay = ({ angles, orientations }) => {
 
   return (
     <div className="angle-display">
-      {angles && (
+      <div className="angle-display-header">
+        <h3 className="angle-display-title">Angle Data</h3>
+        <div className="angle-toggle-buttons">
+          {angles && (
+            <button
+              className={`angle-toggle-btn ${showJointAngles ? 'active' : ''}`}
+              onClick={() => setShowJointAngles(!showJointAngles)}
+              title={showJointAngles ? 'Hide Joint Angles' : 'Show Joint Angles'}
+            >
+              <span className="toggle-icon">{showJointAngles ? '▼' : '▶'}</span>
+              Joint Angles
+            </button>
+          )}
+          {orientations && (
+            <button
+              className={`angle-toggle-btn ${showOrientations ? 'active' : ''}`}
+              onClick={() => setShowOrientations(!showOrientations)}
+              title={showOrientations ? 'Hide Segment Orientations' : 'Show Segment Orientations'}
+            >
+              <span className="toggle-icon">{showOrientations ? '▼' : '▶'}</span>
+              Orientations
+            </button>
+          )}
+        </div>
+      </div>
+
+      {angles && showJointAngles && (
         <div className="angle-section">
           <h3>Joint Angles</h3>
           <div className="angle-grid">
@@ -62,7 +92,7 @@ const AngleDisplay = ({ angles, orientations }) => {
         </div>
       )}
       
-      {orientations && (
+      {orientations && showOrientations && (
         <div className="angle-section">
           <h3>Segment Orientations</h3>
           <div className="angle-grid">
@@ -103,7 +133,9 @@ const AngleDisplay = ({ angles, orientations }) => {
       )}
     </div>
   );
-};
+});
+
+AngleDisplay.displayName = 'AngleDisplay';
 
 export default AngleDisplay;
 

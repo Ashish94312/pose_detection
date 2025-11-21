@@ -5,12 +5,17 @@ import StatusDisplay from './components/StatusDisplay';
 import VideoCanvas from './components/VideoCanvas';
 import Controls from './components/Controls';
 import AngleDisplay from './components/AngleDisplay';
+import ModelSelector from './components/ModelSelector';
+import ResolutionSelector from './components/ResolutionSelector';
 import Info from './components/Info';
 import { JumpWidgets } from './jumpDetection';
+import { DEFAULT_MODEL, DEFAULT_RESOLUTION } from './config/poseConfig';
 import './App.css';
 
 function App() {
   const [appError, setAppError] = useState(null);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [selectedResolution, setSelectedResolution] = useState(DEFAULT_RESOLUTION);
 
   const {
     isModelLoaded,
@@ -22,14 +27,17 @@ function App() {
     orientations,
     startInferenceLoop,
     stopInferenceLoop,
-  } = usePoseDetection();
+    modelType,
+    modelMetadata,
+  } = usePoseDetection(selectedModel);
 
   const {
     videoRef,
     isStreaming,
+    actualResolution,
     startStream,
     stopStream,
-  } = useVideoStream();
+  } = useVideoStream(selectedResolution);
 
   const canvasRef = useRef(null);
 
@@ -78,6 +86,20 @@ function App() {
     setIsRunning(false);
   }, [stopInferenceLoop, stopStream, setIsRunning]);
 
+  // Handle model change
+  const handleModelChange = useCallback((newModelType) => {
+    if (!isRunning) {
+      setSelectedModel(newModelType);
+    }
+  }, [isRunning]);
+
+  // Handle resolution change
+  const handleResolutionChange = useCallback((newResolution) => {
+    if (!isRunning) {
+      setSelectedResolution(newResolution);
+    }
+  }, [isRunning]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -110,7 +132,22 @@ function App() {
             </div>
             <div className="data-section">
               <div className="data-card">
-                <StatusDisplay isModelLoaded={isModelLoaded} fps={fps} />
+                <ModelSelector
+                  currentModel={modelType || selectedModel}
+                  onModelChange={handleModelChange}
+                  isModelLoaded={isModelLoaded}
+                  isRunning={isRunning}
+                />
+                <ResolutionSelector
+                  currentResolution={selectedResolution}
+                  onResolutionChange={handleResolutionChange}
+                  isRunning={isRunning}
+                />
+                <StatusDisplay 
+                  isModelLoaded={isModelLoaded} 
+                  fps={fps} 
+                  actualResolution={actualResolution}
+                />
                 <Controls
                   isModelLoaded={isModelLoaded}
                   isRunning={isRunning}

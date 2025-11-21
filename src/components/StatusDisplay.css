@@ -1,7 +1,7 @@
 .status-container {
   display: flex;
-  gap: 16px;
-  margin: 0 0 20px 0;
+  gap: 20px;
+  margin: 0 0 24px 0;
   padding: 0;
   background-color: transparent;
   border: none;
@@ -12,35 +12,100 @@
 .status-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   font-size: 14px;
-  padding: 0;
-  min-height: 24px;
+  padding: 12px 20px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  flex: 1;
+  min-width: 140px;
+  transition: all var(--transition-base);
+}
+
+.status-item:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
 .status-label {
-  color: #757575;
-  font-weight: 400;
+  color: var(--text-secondary);
+  font-weight: 500;
   white-space: nowrap;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .status-success {
-  color: #424242;
-  font-weight: 500;
+  color: var(--success);
+  font-weight: 600;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-success::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
 }
 
 .status-loading {
-  color: #757575;
-  font-weight: 500;
+  color: var(--warning);
+  font-weight: 600;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-loading::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 8px var(--warning);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .fps-value {
-  color: #212121;
-  font-weight: 500;
-  font-size: 14px;
+  color: var(--primary-light);
+  font-weight: 700;
+  font-size: 16px;
   min-width: 50px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }

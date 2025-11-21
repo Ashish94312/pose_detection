@@ -78,32 +78,44 @@ export class AngleSmoother {
   }
   
   getFilter(key) {
-    if (!this.filters[key]) {
+    // Use Map for better performance with frequent lookups
+    let filter = this.filters[key];
+    if (!filter) {
       if (this.smoothingMethod === 'kalman') {
         // Use provided parameters or fall back to calculated values
         const pNoise = this.processNoise !== null ? this.processNoise : (this.smoothingFactor * 0.1);
         const mNoise = this.measurementNoise !== null ? this.measurementNoise : (this.smoothingFactor * 0.5);
-        this.filters[key] = new KalmanFilter(pNoise, mNoise);
+        filter = new KalmanFilter(pNoise, mNoise);
       } else {
-        this.filters[key] = new ExponentialMovingAverage(this.smoothingFactor);
+        filter = new ExponentialMovingAverage(this.smoothingFactor);
       }
+      this.filters[key] = filter;
     }
-    return this.filters[key];
+    return filter;
   }
   
   smoothAngles(angles) {
     if (!angles) return null;
     
+    // Pre-allocate object with known keys for better performance
     const smoothed = {};
-    for (const [key, value] of Object.entries(angles)) {
+    const keys = Object.keys(angles);
+    const keysLength = keys.length;
+    
+    // Use for loop instead of for...of for better performance
+    for (let i = 0; i < keysLength; i++) {
+      const key = keys[i];
+      const value = angles[key];
+      
       // Only smooth valid angles (not null, not NaN, is a number)
       if (value !== null && typeof value === 'number' && !isNaN(value)) {
         const filter = this.getFilter(key);
         smoothed[key] = filter.update(value);
       } else {
         // Reset filter for invalid values
-        if (this.filters[key]) {
-          this.filters[key].reset();
+        const filter = this.filters[key];
+        if (filter) {
+          filter.reset();
         }
         smoothed[key] = null;
       }
@@ -118,28 +130,39 @@ export class AngleSmoother {
   smoothOrientations(orientations) {
     if (!orientations) return null;
     
+    // Pre-allocate object for better performance
     const smoothed = {};
-    for (const [key, orientation] of Object.entries(orientations)) {
+    const keys = Object.keys(orientations);
+    const keysLength = keys.length;
+    
+    // Use for loop instead of for...of for better performance
+    for (let i = 0; i < keysLength; i++) {
+      const key = keys[i];
+      const orientation = orientations[key];
+      
       if (!orientation || orientation === null) {
         // Reset filters for this orientation segment
         const angleKey = `${key}_angle`;
         const xKey = `${key}_x`;
         const yKey = `${key}_y`;
         const zKey = `${key}_z`;
-        if (this.filters[angleKey]) this.filters[angleKey].reset();
-        if (this.filters[xKey]) this.filters[xKey].reset();
-        if (this.filters[yKey]) this.filters[yKey].reset();
-        if (this.filters[zKey]) this.filters[zKey].reset();
+        const angleFilter = this.filters[angleKey];
+        const xFilter = this.filters[xKey];
+        const yFilter = this.filters[yKey];
+        const zFilter = this.filters[zKey];
+        if (angleFilter) angleFilter.reset();
+        if (xFilter) xFilter.reset();
+        if (yFilter) yFilter.reset();
+        if (zFilter) zFilter.reset();
         smoothed[key] = null;
         continue;
       }
       
       // Smooth angle property
       let smoothedAngle = orientation.angle;
-      if (orientation.angle !== null && orientation.angle !== undefined && 
-          typeof orientation.angle === 'number' && !isNaN(orientation.angle)) {
-        const angleFilter = this.getFilter(`${key}_angle`);
-        smoothedAngle = angleFilter.update(orientation.angle);
+      const angle = orientation.angle;
+      if (angle !== null && angle !== undefined && typeof angle === 'number' && !isNaN(angle)) {
+        smoothedAngle = this.getFilter(`${key}_angle`).update(angle);
       }
       
       // Smooth direction vector components (x, y, z)
@@ -147,22 +170,19 @@ export class AngleSmoother {
       let smoothedY = orientation.y;
       let smoothedZ = orientation.z;
       
-      if (orientation.x !== null && orientation.x !== undefined && 
-          typeof orientation.x === 'number' && !isNaN(orientation.x)) {
-        const xFilter = this.getFilter(`${key}_x`);
-        smoothedX = xFilter.update(orientation.x);
+      const x = orientation.x;
+      if (x !== null && x !== undefined && typeof x === 'number' && !isNaN(x)) {
+        smoothedX = this.getFilter(`${key}_x`).update(x);
       }
       
-      if (orientation.y !== null && orientation.y !== undefined && 
-          typeof orientation.y === 'number' && !isNaN(orientation.y)) {
-        const yFilter = this.getFilter(`${key}_y`);
-        smoothedY = yFilter.update(orientation.y);
+      const y = orientation.y;
+      if (y !== null && y !== undefined && typeof y === 'number' && !isNaN(y)) {
+        smoothedY = this.getFilter(`${key}_y`).update(y);
       }
       
-      if (orientation.z !== null && orientation.z !== undefined && 
-          typeof orientation.z === 'number' && !isNaN(orientation.z)) {
-        const zFilter = this.getFilter(`${key}_z`);
-        smoothedZ = zFilter.update(orientation.z);
+      const z = orientation.z;
+      if (z !== null && z !== undefined && typeof z === 'number' && !isNaN(z)) {
+        smoothedZ = this.getFilter(`${key}_z`).update(z);
       }
       
       // Reconstruct smoothed orientation object
@@ -210,33 +230,55 @@ export class LandmarkSmoother {
       return landmarks;
     }
     
+    const landmarksLength = landmarks.length;
+    
     // Initialize smoothed landmarks if needed
-    if (!this.smoothedLandmarks || this.smoothedLandmarks.length !== landmarks.length) {
-      this.smoothedLandmarks = landmarks.map(l => ({ ...l }));
+    if (!this.smoothedLandmarks || this.smoothedLandmarks.length !== landmarksLength) {
+      // Pre-allocate array for better performance
+      this.smoothedLandmarks = new Array(landmarksLength);
+      for (let i = 0; i < landmarksLength; i++) {
+        const l = landmarks[i];
+        this.smoothedLandmarks[i] = {
+          x: l.x,
+          y: l.y,
+          z: l.z || 0,
+          visibility: l.visibility
+        };
+      }
       return landmarks;
     }
     
-    const smoothed = landmarks.map((landmark, index) => {
-      const prev = this.smoothedLandmarks[index];
-      
-      if (this.useKalman) {
-        // Use Kalman filter for each coordinate (better smoothing)
-        return {
-          x: this.getKalmanFilter(index, 'x').update(landmark.x),
-          y: this.getKalmanFilter(index, 'y').update(landmark.y),
-          z: this.getKalmanFilter(index, 'z').update(landmark.z || 0),
-          visibility: landmark.visibility || prev.visibility
-        };
-      } else {
-        // Use EMA (simpler, faster)
-        return {
-          x: this.alpha * landmark.x + (1 - this.alpha) * prev.x,
-          y: this.alpha * landmark.y + (1 - this.alpha) * prev.y,
-          z: this.alpha * (landmark.z || 0) + (1 - this.alpha) * (prev.z || 0),
+    // Pre-allocate array for better performance
+    const smoothed = new Array(landmarksLength);
+    const oneMinusAlpha = 1 - this.alpha;
+    
+    if (this.useKalman) {
+      // Use Kalman filter for each coordinate (better smoothing)
+      for (let i = 0; i < landmarksLength; i++) {
+        const landmark = landmarks[i];
+        const prev = this.smoothedLandmarks[i];
+        smoothed[i] = {
+          x: this.getKalmanFilter(i, 'x').update(landmark.x),
+          y: this.getKalmanFilter(i, 'y').update(landmark.y),
+          z: this.getKalmanFilter(i, 'z').update(landmark.z || 0),
           visibility: landmark.visibility || prev.visibility
         };
       }
-    });
+    } else {
+      // Use EMA (simpler, faster) - optimized loop
+      for (let i = 0; i < landmarksLength; i++) {
+        const landmark = landmarks[i];
+        const prev = this.smoothedLandmarks[i];
+        const prevZ = prev.z || 0;
+        const landmarkZ = landmark.z || 0;
+        smoothed[i] = {
+          x: this.alpha * landmark.x + oneMinusAlpha * prev.x,
+          y: this.alpha * landmark.y + oneMinusAlpha * prev.y,
+          z: this.alpha * landmarkZ + oneMinusAlpha * prevZ,
+          visibility: landmark.visibility || prev.visibility
+        };
+      }
+    }
     
     // Update stored smoothed landmarks
     this.smoothedLandmarks = smoothed;

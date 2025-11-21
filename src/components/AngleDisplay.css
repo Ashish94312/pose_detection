@@ -6,9 +6,107 @@
   border: none;
 }
 
-.angle-section {
+.angle-display-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid var(--border-color);
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.angle-display-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.angle-display-title::before {
+  content: '';
+  width: 4px;
+  height: 16px;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  border-radius: 2px;
+}
+
+.angle-toggle-buttons {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.angle-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all var(--transition-base);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.angle-toggle-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.angle-toggle-btn.active {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
+  border-color: var(--primary);
+  color: var(--primary-light);
+}
+
+.angle-toggle-btn.active:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.3) 0%, rgba(139, 92, 246, 0.3) 100%);
+  box-shadow: var(--shadow-md), 0 0 15px rgba(99, 102, 241, 0.2);
+}
+
+.toggle-icon {
+  font-size: 10px;
+  transition: transform var(--transition-base);
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+}
+
+.angle-toggle-btn.active .toggle-icon {
+  transform: rotate(0deg);
+}
+
+.angle-section {
+  margin-bottom: 32px;
   min-height: 100px;
+  animation: slideDown var(--transition-base) ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .angle-section:last-child {
@@ -16,20 +114,31 @@
 }
 
 .angle-section h3 {
-  font-size: 12px;
-  font-weight: 500;
-  margin: 0 0 16px 0;
-  color: #212121;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #e0e0e0;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+  color: var(--text-primary);
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--border-color);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.angle-section h3::before {
+  content: '';
+  width: 4px;
+  height: 16px;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  border-radius: 2px;
 }
 
 .angle-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+  gap: 16px;
   font-size: 13px;
   width: 100%;
 }
@@ -38,23 +147,55 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  background: #fafafa;
-  border-radius: 4px;
-  border: 1px solid #e0e0e0;
-  min-height: 44px;
+  padding: 16px 20px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  min-height: 56px;
+  transition: all var(--transition-base);
+  position: relative;
+  overflow: hidden;
+}
+
+.angle-group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  opacity: 0;
+  transition: opacity var(--transition-base);
+}
+
+.angle-group:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  transform: translateX(4px);
+  box-shadow: var(--shadow-md);
+}
+
+.angle-group:hover::before {
+  opacity: 1;
 }
 
 .angle-label {
-  color: #757575;
-  font-weight: 400;
+  color: var(--text-secondary);
+  font-weight: 500;
   flex-shrink: 0;
+  font-size: 13px;
 }
 
 .angle-value {
-  font-weight: 500;
-  color: #212121;
-  min-width: 60px;
+  font-weight: 700;
+  color: var(--primary-light);
+  min-width: 70px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  background: linear-gradient(135deg, var(--primary-light) 0%, var(--secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }

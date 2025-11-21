@@ -539,6 +539,7 @@ class JumpDetector {
     this.upwardVelocityStartTime = 0; // Reset for next time
     
     // Initialize jump tracking
+    // Note: jumpCount is NOT incremented here - it will be incremented only when jump is validated
     this.jumpState.currentJump = {
       takeoffTime: poseData.timestamp,
       takeoffHeight: hipCenter ? hipCenter.y : null, // Store takeoff height for jump height calculation
@@ -546,20 +547,21 @@ class JumpDetector {
       peakHeight: hipCenter ? hipCenter.y : null, // Minimum Y (highest point)
       peakGRF: null,
       airtime: 0,
+      pendingJumpNumber: this.jumpState.jumpCount + 1, // Track what the jump number would be if validated
     };
     
-    this.jumpState.jumpCount++;
-    
     if (this.onJumpDetected) {
+      // Note: jumpNumber here is pending - the actual count will be set when jump is validated
+      // The UI should prioritize lastLanding.jumpNumber (validated) over lastJump.jumpNumber (pending)
       this.onJumpDetected({
         timestamp: poseData.timestamp,
-        jumpNumber: this.jumpState.jumpCount,
+        jumpNumber: this.jumpState.currentJump.pendingJumpNumber, // Pending number (what it would be if validated)
         takeoffTime: poseData.timestamp,
       });
     }
     
     console.log('FSM: TAKEOFF', {
-      jumpNumber: this.jumpState.jumpCount,
+      pendingJumpNumber: this.jumpState.currentJump.pendingJumpNumber,
       timestamp: poseData.timestamp,
     });
   }
@@ -580,7 +582,7 @@ class JumpDetector {
     }
     
     console.log('FSM: AIRBORNE', {
-      jumpNumber: this.jumpState.jumpCount,
+      pendingJumpNumber: this.jumpState.currentJump?.pendingJumpNumber || 'N/A',
       timestamp: poseData.timestamp,
     });
   }
@@ -598,7 +600,7 @@ class JumpDetector {
     }
     
     console.log('FSM: LANDING', {
-      jumpNumber: this.jumpState.jumpCount,
+      pendingJumpNumber: this.jumpState.currentJump?.pendingJumpNumber || 'N/A',
       timestamp: poseData.timestamp,
     });
   }
@@ -645,51 +647,62 @@ class JumpDetector {
                           jumpHeight >= minJumpHeightMeters &&
                           airtime >= this.config.minAirborneTime;
       
-      // Always trigger landing callback with calculated metrics (even for invalid jumps)
-      // This ensures the UI always shows the data
-      if (this.onLandingDetected) {
-        const landingData = {
-          timestamp: jump.landingTime,
-          jumpNumber: this.jumpState.jumpCount,
-          jumpHeight: jumpHeight,
-          airTime: airtime,
-          takeoffTime: jump.takeoffTime,
-          landingTime: jump.landingTime,
-          groundReactionForce: jump.peakGRF,
-        };
-        
-        console.log('[JumpDetector] Landing detected:', {
-          airTime: landingData.airTime,
-          jumpHeight: landingData.jumpHeight,
-          landingTime: landingData.landingTime,
-          takeoffHeight: jump.takeoffHeight,
-          peakHeight: jump.peakHeight,
-          scale: scale,
-        });
-        
-        this.onLandingDetected(landingData);
-      }
-      
+      // Only increment jump count if jump is valid
+      // This ensures the count only increases for valid jumps
+      const previousJumpCount = this.jumpState.jumpCount;
       if (isValidJump) {
-        console.log('FSM: Jump complete', {
+        this.jumpState.jumpCount++;
+        console.log('FSM: Jump complete - COUNT INCREMENTED', {
+          previousCount: previousJumpCount,
+          newCount: this.jumpState.jumpCount,
           jumpNumber: this.jumpState.jumpCount,
           jumpHeight: jumpHeight,
           airtime: airtime,
           peakGRF: jump.peakGRF,
         });
       } else {
-        // Invalid jump - don't count it, but don't decrement (stats never go backwards)
-        console.warn('FSM: Invalid jump discarded', {
+        // Invalid jump - don't count it
+        console.warn('FSM: Invalid jump discarded - COUNT NOT INCREMENTED', {
           reason: reason,
+          currentCount: this.jumpState.jumpCount,
           jumpHeight: jumpHeight,
           airtime: airtime,
           minJumpHeightMeters: minJumpHeightMeters,
           minAirborneTime: this.config.minAirborneTime,
+          jumpHeightNull: jumpHeight === null,
+          heightTooSmall: jumpHeight !== null && jumpHeight < minJumpHeightMeters,
+          airtimeTooShort: airtime < this.config.minAirborneTime,
         });
-        // Reset jump count if this was the first invalid jump
-        if (this.jumpState.jumpCount > 0) {
-          this.jumpState.jumpCount--;
-        }
+      }
+      
+      // Always trigger landing callback with calculated metrics (even for invalid jumps)
+      // This ensures the UI always shows the data
+      // Use the actual jump count (which may or may not have been incremented)
+      if (this.onLandingDetected) {
+        const landingData = {
+          timestamp: jump.landingTime,
+          jumpNumber: this.jumpState.jumpCount, // Use actual count (only incremented if valid)
+          jumpHeight: jumpHeight,
+          airTime: airtime,
+          takeoffTime: jump.takeoffTime,
+          landingTime: jump.landingTime,
+          groundReactionForce: jump.peakGRF,
+          isValid: isValidJump, // Include validation status
+        };
+        
+        console.log('[JumpDetector] Landing detected - CALLBACK FIRED', {
+          airTime: landingData.airTime,
+          jumpHeight: landingData.jumpHeight,
+          landingTime: landingData.landingTime,
+          takeoffHeight: jump.takeoffHeight,
+          peakHeight: jump.peakHeight,
+          scale: scale,
+          isValid: isValidJump,
+          jumpNumber: landingData.jumpNumber,
+          jumpCount: this.jumpState.jumpCount,
+        });
+        
+        this.onLandingDetected(landingData);
       }
       
       this.jumpState.lastJumpEndTime = this.previousPoseData ? this.previousPoseData.timestamp : Date.now();
@@ -704,6 +717,7 @@ class JumpDetector {
   /**
    * Calculate vertical velocity from pose data
    * Pipeline: Raw landmarks → Raw velocity → Smoothed velocity (EMA)
+   * Filters out horizontal movement artifacts to ensure velocity only reflects vertical movement
    */
   calculateVerticalVelocity(poseData) {
     if (!this.previousPoseData || !poseData.joints || !this.previousPoseData.joints) {
@@ -726,14 +740,29 @@ class JumpDetector {
       return this.smoothedVelocity;
     }
 
-    // Raw velocity from raw landmarks (in normalized units per second)
-    const deltaYNormalized = previousHip.y - currentHip.y;
+    // Calculate horizontal movement to detect if velocity change is due to horizontal movement
+    const deltaXNormalized = Math.abs(currentHip.x - previousHip.x);
+    const deltaYNormalized = previousHip.y - currentHip.y; // Positive = moving up
+    const horizontalVelocityNormalized = deltaXNormalized / timeDelta;
     const rawVelocityNormalized = deltaYNormalized / timeDelta;
     
-    // Convert to m/s if scale is available, otherwise keep in normalized units
+    // Convert to m/s if scale is available
     const scale = this.config.normalizedToMeters || 1.0;
     const rawVelocityMs = rawVelocityNormalized * scale;
     this.rawVelocity = rawVelocityMs;
+
+    // Filter out velocity changes that are likely due to horizontal movement
+    // If horizontal movement is much larger than vertical, ignore the vertical change
+    const horizontalMovementThreshold = 0.05; // normalized units/s
+    if (horizontalVelocityNormalized > horizontalMovementThreshold && 
+        Math.abs(rawVelocityNormalized) < horizontalVelocityNormalized * 0.5) {
+      // Likely horizontal movement - decay velocity instead of updating
+      this.smoothedVelocity = this.smoothedVelocity * 0.95;
+      if (Math.abs(this.smoothedVelocity) < 0.01) {
+        this.smoothedVelocity = 0;
+      }
+      return this.smoothedVelocity;
+    }
 
     // Noise gate (in normalized units)
     const noiseThresholdNormalized = this.config.noiseThresholdNormalized;

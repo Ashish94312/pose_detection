@@ -10,10 +10,12 @@
  * @returns {boolean} True if we have enough valid data
  */
 const hasValidPoseData = (landmarks, angles) => {
-  if (!landmarks || landmarks.length < 33) return false;
+  if (!landmarks || (landmarks.length < 17 && landmarks.length < 33)) return false;
   
   // Check if we have at least some key visible landmarks
-  const keyIndices = [11, 12, 23, 24]; // shoulders and hips
+  // Different indices for MoveNet (17) vs BlazePose (33)
+  const isMoveNet = landmarks.length === 17;
+  const keyIndices = isMoveNet ? [5, 6, 11, 12] : [11, 12, 23, 24]; // shoulders and hips
   const hasKeyLandmarks = keyIndices.some(idx => {
     const landmark = landmarks[idx];
     return landmark && 
@@ -35,20 +37,32 @@ const hasValidPoseData = (landmarks, angles) => {
  * @param {Object} orientations - Segment orientations object
  * @param {number} timestamp - Timestamp in milliseconds
  * @param {number} fps - Current FPS
+ * @param {Object} modelMetadata - Model metadata (optional)
  * @returns {Object|null} Structured pose data or null if invalid
  */
-export const createPoseData = (landmarks, angles, orientations, timestamp, fps) => {
+export const createPoseData = (landmarks, angles, orientations, timestamp, fps, modelMetadata = null) => {
   // Validate that we have minimum valid data
   if (!hasValidPoseData(landmarks, angles)) {
     return null;
   }
   
+  // Determine model info from metadata or landmarks
+  const isMoveNet = landmarks.length === 17;
+  const defaultMetadata = {
+    model: isMoveNet ? 'MoveNet Lightning' : 'BlazePose GHUM',
+    provider: isMoveNet ? 'TensorFlow.js' : 'MediaPipe',
+    keypoints: landmarks.length,
+    has3D: !isMoveNet,
+    version: '1.0',
+  };
+  
+  const metadata = modelMetadata || defaultMetadata;
+  
   return {
     timestamp: timestamp || Date.now(),
     fps: fps || 0,
     metadata: {
-      model: 'BlazePose GHUM',
-      version: '1.0',
+      ...metadata,
       frameRate: fps,
     },
     joints: extractJoints(landmarks),
@@ -60,14 +74,45 @@ export const createPoseData = (landmarks, angles, orientations, timestamp, fps) 
 
 /**
  * Extract joint positions from landmarks
+ * Supports both MoveNet (17 keypoints) and BlazePose (33 keypoints)
  * @param {Array} landmarks - Pose landmarks
  * @returns {Object} Joint positions
  */
 const extractJoints = (landmarks) => {
-  if (!landmarks || landmarks.length < 33) {
+  if (!landmarks || (landmarks.length < 17 && landmarks.length < 33)) {
     return null;
   }
 
+  const isMoveNet = landmarks.length === 17;
+  
+  if (isMoveNet) {
+    // MoveNet has 17 keypoints with different indices
+    return {
+      // Face
+      nose: formatLandmark(landmarks[0]),
+      leftEye: formatLandmark(landmarks[1]),
+      rightEye: formatLandmark(landmarks[2]),
+      leftEar: formatLandmark(landmarks[3]),
+      rightEar: formatLandmark(landmarks[4]),
+      
+      // Upper body
+      leftShoulder: formatLandmark(landmarks[5]),
+      rightShoulder: formatLandmark(landmarks[6]),
+      leftElbow: formatLandmark(landmarks[7]),
+      rightElbow: formatLandmark(landmarks[8]),
+      leftWrist: formatLandmark(landmarks[9]),
+      rightWrist: formatLandmark(landmarks[10]),
+      
+      // Lower body
+      leftHip: formatLandmark(landmarks[11]),
+      rightHip: formatLandmark(landmarks[12]),
+      leftKnee: formatLandmark(landmarks[13]),
+      rightKnee: formatLandmark(landmarks[14]),
+      leftAnkle: formatLandmark(landmarks[15]),
+      rightAnkle: formatLandmark(landmarks[16]),
+    };
+  } else {
+    // BlazePose has 33 keypoints
   return {
     // Face
     nose: formatLandmark(landmarks[0]),
@@ -92,6 +137,7 @@ const extractJoints = (landmarks) => {
     leftAnkle: formatLandmark(landmarks[27]),
     rightAnkle: formatLandmark(landmarks[28]),
   };
+  }
 };
 
 /**

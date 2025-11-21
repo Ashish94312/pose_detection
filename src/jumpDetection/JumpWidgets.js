@@ -26,15 +26,50 @@ const JumpWidgets = () => {
   const [showMassInput, setShowMassInput] = useState(false);
 
   useEffect(() => {
+    // Helper function to update state from jumpDetector
+    const updateStateFromDetector = () => {
+      const state = jumpDetector.getState();
+      // Always create a new object to ensure React detects the change
+      // Use functional update to get the latest state
+      setJumpState(prevState => {
+        const newState = {
+          fsmState: state.fsmState,
+          isJumping: state.isJumping,
+          isInAir: state.isInAir,
+          isLanding: state.isLanding,
+          jumpCount: state.jumpCount,
+        };
+        // Always return new state object - React will handle comparison
+        return newState;
+      });
+      setCurrentAirtime(state.currentAirtime || 0);
+    };
+
     // Set up callbacks
     jumpDetector.onJumpDetected = (data) => {
       setLastJump(data);
-      setJumpState(jumpDetector.getState());
+      updateStateFromDetector();
     };
 
     jumpDetector.onLandingDetected = (data) => {
+      console.log('[JumpWidgets] onLandingDetected callback fired', {
+        jumpNumber: data.jumpNumber,
+        isValid: data.isValid,
+        jumpHeight: data.jumpHeight,
+      });
       setLastLanding(data);
-      setJumpState(jumpDetector.getState());
+      // Immediately update state when landing is detected
+      // The jumpCount has already been incremented in transitionToGrounded if valid
+      // Force update by calling updateStateFromDetector
+      updateStateFromDetector();
+      // Also force an immediate update after a short delay to ensure React processes it
+      setTimeout(() => {
+        const currentState = jumpDetector.getState();
+        console.log('[JumpWidgets] State after landing:', {
+          jumpCount: currentState.jumpCount,
+        });
+        setJumpState(currentState);
+      }, 10);
     };
 
     jumpDetector.onForceCalculated = (data) => {
@@ -44,11 +79,10 @@ const JumpWidgets = () => {
     // Subscribe to pose data
     jumpDetector.subscribe();
 
-    // Update state periodically
+    // Update state periodically to catch any missed updates
+    // This ensures the UI stays in sync even if callbacks miss an update
     const interval = setInterval(() => {
-      const state = jumpDetector.getState();
-      setJumpState(state);
-      setCurrentAirtime(state.currentAirtime || 0);
+      updateStateFromDetector();
     }, 100);
 
     return () => {
@@ -238,11 +272,23 @@ const JumpStatsWidget = ({ lastJump, lastLanding }) => {
           <span className="stat-label">Landing Time:</span>
           <span className="stat-value">{lastLanding && lastLanding.landingTime ? formatTime(lastLanding.landingTime) : (lastLanding && lastLanding.timestamp ? formatTime(lastLanding.timestamp) : '—')}</span>
         </div>
-        {lastJump && (
+        {lastLanding && (
           <>
             <div className="stat-row">
               <span className="stat-label">Jump #:</span>
-              <span className="stat-value">{lastJump.jumpNumber}</span>
+              <span className="stat-value">{lastLanding.jumpNumber}</span>
+            </div>
+            <div className="stat-row">
+              <span className="stat-label">Takeoff:</span>
+              <span className="stat-value">{formatTime(lastLanding.takeoffTime || lastLanding.timestamp)}</span>
+            </div>
+          </>
+        )}
+        {!lastLanding && lastJump && (
+          <>
+            <div className="stat-row">
+              <span className="stat-label">Jump #:</span>
+              <span className="stat-value">Pending...</span>
             </div>
             <div className="stat-row">
               <span className="stat-label">Takeoff:</span>

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import './Controls.css';
 
 /**
@@ -7,7 +8,7 @@ import './Controls.css';
  * @param {Function} onStart - Start button handler
  * @param {Function} onStop - Stop button handler
  */
-const Controls = ({ isModelLoaded, isRunning, onStart, onStop }) => {
+const Controls = memo(({ isModelLoaded, isRunning, onStart, onStop }) => {
   return (
     <div className="controls">
       <button
@@ -26,7 +27,9 @@ const Controls = ({ isModelLoaded, isRunning, onStart, onStop }) => {
       </button>
     </div>
   );
-};
+});
+
+Controls.displayName = 'Controls';
 
 export default Controls;
 

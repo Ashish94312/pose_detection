@@ -1,25 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { POSE_CONFIG, SMOOTHING_CONFIG, PERFORMANCE_CONFIG } from '../config/poseConfig';
-import { drawPose } from '../utils/poseDrawing';
-import { calculateAllAngles, calculateAllOrientations } from '../utils/poseAngles';
+import { SMOOTHING_CONFIG, PERFORMANCE_CONFIG, getModelConfig, DEFAULT_MODEL } from '../config/poseConfig';
+import { createPoseModel, getModelMetadata } from '../models/poseModelFactory';
 import { AngleSmoother, LandmarkSmoother } from '../utils/smoothing';
-import { createPoseData } from '../utils/poseSchema';
-import { posePubSub } from '../utils/pubsub';
+import { createBlazePoseHandler, createMoveNetHandler, drawPoseForModel } from './modelHandlers';
 
 /**
- * Custom hook for MediaPipe BlazePose GHUM pose detection
+ * Custom hook for multi-model pose detection (BlazePose & MoveNet)
+ * @param {string} modelType - 'blazepose' or 'movenet' (default: DEFAULT_MODEL)
  * @returns {Object} Pose detection state and methods
  */
-export const usePoseDetection = () => {
+export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [fps, setFps] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState(null);
   const [angles, setAngles] = useState(null);
   const [orientations, setOrientations] = useState(null);
+  const [currentModelType, setCurrentModelType] = useState(modelType);
   
-  const poseLandmarkerRef = useRef(null);
+  const poseModelRef = useRef(null);
   const animationFrameRef = useRef(null);
   const lastTimeRef = useRef(0);
   const frameCountRef = useRef(0);
@@ -32,6 +31,8 @@ export const usePoseDetection = () => {
   const lastLandmarksRef = useRef(null);
   const lastAnglesRef = useRef(null);
   const lastOrientationsRef = useRef(null);
+  const modelMetadataRef = useRef(null);
+  const lastFpsRef = useRef(0);
   
   // Initialize smoothers
   useEffect(() => {
@@ -51,7 +52,7 @@ export const usePoseDetection = () => {
       );
       landmarkSmootherRef.current = new LandmarkSmoother(
         SMOOTHING_CONFIG.landmarkSmoothing,
-        SMOOTHING_CONFIG.method === 'kalman', // Use Kalman for landmarks if method is kalman
+        SMOOTHING_CONFIG.landmarkSmoothingMethod === 'kalman', // Use specified method for landmarks
         SMOOTHING_CONFIG.kalmanProcessNoise || 0.001,
         SMOOTHING_CONFIG.kalmanMeasurementNoise || 0.25
       );
@@ -63,71 +64,127 @@ export const usePoseDetection = () => {
     isRunningRef.current = isRunning;
   }, [isRunning]);
 
-  // Initialize MediaPipe Pose Landmarker
+  // Initialize pose detection model
   useEffect(() => {
     let isMounted = true;
     
-    const initializePoseLandmarker = async () => {
+    const initializeModel = async () => {
       try {
         setError(null);
+        setIsModelLoaded(false);
         
-        const vision = await FilesetResolver.forVisionTasks(POSE_CONFIG.wasmPath);
-        const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: POSE_CONFIG.modelAssetPath,
-            delegate: POSE_CONFIG.delegate,
-          },
-          runningMode: POSE_CONFIG.runningMode,
-          numPoses: POSE_CONFIG.numPoses,
-          minPoseDetectionConfidence: POSE_CONFIG.minPoseDetectionConfidence,
-          minPosePresenceConfidence: POSE_CONFIG.minPosePresenceConfidence,
-          minTrackingConfidence: POSE_CONFIG.minTrackingConfidence,
-        });
+        // Clean up previous model state completely
+        if (poseModelRef.current) {
+          poseModelRef.current.dispose();
+          poseModelRef.current = null;
+        }
+        
+        // Reset all model-specific state to ensure clean separation
+        lastLandmarksRef.current = null;
+        lastAnglesRef.current = null;
+        lastOrientationsRef.current = null;
+        frameSkipCounterRef.current = 0;
+        lastVideoTimeRef.current = -1;
+        
+        // Reset smoothers for clean state
+        if (angleSmootherRef.current) {
+          angleSmootherRef.current.reset();
+        }
+        if (orientationSmootherRef.current) {
+          orientationSmootherRef.current.reset();
+        }
+        if (landmarkSmootherRef.current) {
+          landmarkSmootherRef.current.reset();
+        }
+        
+        // Clear state
+        setAngles(null);
+        setOrientations(null);
+        
+        // Get model configuration
+        const config = getModelConfig(currentModelType);
+        const modelMetadata = getModelMetadata(currentModelType);
+        modelMetadataRef.current = modelMetadata;
+        
+        // Create model instance
+        const model = createPoseModel(currentModelType, config);
+        
+        // Load model
+        await model.load();
 
         if (isMounted) {
-          poseLandmarkerRef.current = poseLandmarker;
+          poseModelRef.current = model;
           setIsModelLoaded(true);
+          setCurrentModelType(currentModelType);
         }
       } catch (err) {
-        console.error('Error initializing pose landmarker:', err);
+        console.error(`Error initializing ${currentModelType} model:`, err);
         if (isMounted) {
-          setError(`Failed to load model: ${err.message || 'Unknown error'}. Make sure WebGPU is supported in your browser.`);
+          const errorMessage = currentModelType === 'movenet'
+            ? `Failed to load MoveNet model: ${err.message || 'Unknown error'}. Make sure you have internet connection.`
+            : `Failed to load BlazePose model: ${err.message || 'Unknown error'}. Make sure WebGPU is supported in your browser.`;
+          setError(errorMessage);
           setIsModelLoaded(false);
         }
       }
     };
 
-    initializePoseLandmarker();
+    initializeModel();
     
     return () => {
       isMounted = false;
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
+      if (poseModelRef.current) {
+        poseModelRef.current.dispose();
+        poseModelRef.current = null;
+      }
+      // Clean up state on unmount
+      lastLandmarksRef.current = null;
+      lastAnglesRef.current = null;
+      lastOrientationsRef.current = null;
     };
-  }, []);
+  }, [currentModelType]);
+  
+  // Update model when modelType prop changes
+  useEffect(() => {
+    if (modelType !== currentModelType) {
+      setCurrentModelType(modelType);
+    }
+  }, [modelType, currentModelType]);
 
-  // Calculate FPS
+  // Calculate FPS - optimized to reduce state updates
   const updateFPS = useCallback((currentTime) => {
     frameCountRef.current++;
     
     if (lastTimeRef.current === 0) {
       lastTimeRef.current = currentTime;
+      return;
     }
     
     const deltaTime = currentTime - lastTimeRef.current;
     if (deltaTime >= 1000) {
+      // Calculate FPS: frames per second = (frameCount * 1000) / deltaTime
+      // This formula correctly calculates FPS over the time period
       const currentFps = Math.round((frameCountRef.current * 1000) / deltaTime);
-      setFps(currentFps);
       
+      // Only update state if FPS changed significantly (reduce unnecessary re-renders)
+      // Update if difference is >= 2 FPS to avoid micro-updates
+      if (Math.abs(currentFps - lastFpsRef.current) >= 2 || lastFpsRef.current === 0) {
+        setFps(currentFps);
+        lastFpsRef.current = currentFps;
+      }
+      
+      // Reset for next measurement period
       frameCountRef.current = 0;
       lastTimeRef.current = currentTime;
     }
   }, []);
 
-  // Run inference on video frame
-  const runInference = useCallback((video, canvas, ctx, currentFps) => {
-    if (!poseLandmarkerRef.current || !video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+  // Run inference on video frame - uses model-specific handler
+  const runInference = useCallback(async (video, canvas, ctx, currentFps) => {
+    if (!poseModelRef.current || !video || video.readyState !== video.HAVE_ENOUGH_DATA) {
       return;
     }
 
@@ -140,97 +197,49 @@ export const usePoseDetection = () => {
       
       frameSkipCounterRef.current++;
       
-      let rawLandmarks = null;
-      
-      if (shouldRunDetection) {
-        // Run pose detection
-        const result = poseLandmarkerRef.current.detectForVideo(video, performance.now());
+      // Use model-specific handler based on current model type
+      const isBlazePose = currentModelType === 'blazepose';
 
-        if (result.landmarks && result.landmarks.length > 0) {
-          rawLandmarks = result.landmarks[0];
-          // Cache raw landmarks before smoothing
-          lastLandmarksRef.current = rawLandmarks;
-        } else {
-          lastLandmarksRef.current = null;
-        }
+      if (isBlazePose) {
+        // BlazePose handler (synchronous detection)
+        await createBlazePoseHandler(
+          poseModelRef,
+          lastLandmarksRef,
+          lastAnglesRef,
+          lastOrientationsRef,
+          angleSmootherRef,
+          orientationSmootherRef,
+          landmarkSmootherRef,
+          setAngles,
+          setOrientations,
+          modelMetadataRef,
+          frameSkipCounterRef,
+          shouldRunDetection
+        )(video, canvas, ctx, currentFps);
       } else {
-        // Use cached raw landmarks on skipped frames
-        rawLandmarks = lastLandmarksRef.current;
-      }
-      
-      // Always apply smoothing to landmarks (whether new or cached) for consistent smooth rendering
-      let landmarks = rawLandmarks;
-      if (landmarks && SMOOTHING_CONFIG.enabled && landmarkSmootherRef.current) {
-        landmarks = landmarkSmootherRef.current.smooth(landmarks);
-      }
-      
-      // Always draw if we have landmarks (either new or cached)
-      if (landmarks) {
-        let smoothedAngles = lastAnglesRef.current;
-        let smoothedOrientations = lastOrientationsRef.current;
-        
-        // Only calculate angles/orientations on detection frames (expensive operations)
-        if (shouldRunDetection) {
-          // Calculate angles and orientations
-          const rawAngles = calculateAllAngles(landmarks);
-          const calculatedOrientations = calculateAllOrientations(landmarks);
-          
-          // Apply angle smoothing if enabled
-          smoothedAngles = rawAngles;
-          if (SMOOTHING_CONFIG.enabled && angleSmootherRef.current && rawAngles) {
-            smoothedAngles = angleSmootherRef.current.smoothAngles(rawAngles);
-          }
-          
-          // Apply orientation smoothing to reduce fluctuations
-          smoothedOrientations = calculatedOrientations;
-          if (SMOOTHING_CONFIG.enabled && orientationSmootherRef.current && calculatedOrientations) {
-            smoothedOrientations = orientationSmootherRef.current.smoothOrientations(calculatedOrientations);
-          }
-          
-          // Cache smoothed values for non-detection frames
-          lastAnglesRef.current = smoothedAngles;
-          lastOrientationsRef.current = smoothedOrientations;
-        }
-        
-        // Update state (use cached smoothed values if available)
-        if (smoothedAngles) {
-          setAngles(smoothedAngles);
-        }
-        if (smoothedOrientations) {
-          setOrientations(smoothedOrientations);
-        }
-        
-        // Create structured pose data and publish (only on detection frames)
-        if (shouldRunDetection && smoothedAngles && smoothedOrientations) {
-          const poseData = createPoseData(
-            landmarks,
-            smoothedAngles,
-            smoothedOrientations,
-            performance.now(),
-            currentFps || 0
-          );
-          
-          // Only publish and log if we have valid data
-          if (poseData) {
-            // Publish pose data via pub/sub
-            posePubSub.publish(poseData);
-          }
-        }
-        
-        // Draw pose landmarks on top of video (every frame for smooth rendering)
-        drawPose(landmarks, canvas, ctx);
-      } else {
-        setAngles(null);
-        setOrientations(null);
-        lastAnglesRef.current = null;
-        lastOrientationsRef.current = null;
+        // MoveNet handler (asynchronous detection)
+        await createMoveNetHandler(
+          poseModelRef,
+          lastLandmarksRef,
+          lastAnglesRef,
+          lastOrientationsRef,
+          angleSmootherRef,
+          orientationSmootherRef,
+          landmarkSmootherRef,
+          setAngles,
+          setOrientations,
+          modelMetadataRef,
+          frameSkipCounterRef,
+          shouldRunDetection,
+          isRunningRef
+        )(video, canvas, ctx, currentFps);
       }
     }
-  }, []);
+  }, [currentModelType]);
 
   // Start inference loop
   const startInferenceLoop = useCallback((video, canvas) => {
-    if (!poseLandmarkerRef.current || !video || !canvas) {
+    if (!poseModelRef.current || !video || !canvas) {
       console.error('Cannot start inference loop: missing dependencies');
       return;
     }
@@ -267,12 +276,12 @@ export const usePoseDetection = () => {
       lastAnglesRef.current = null;
       lastOrientationsRef.current = null;
 
-      const processFrame = (currentTime) => {
+      const processFrame = async (currentTime) => {
         if (!isRunningRef.current) {
           return;
         }
 
-        // Always draw video frame
+        // Always draw video frame first - use willReadFrequently: false for better performance
         if (video.readyState >= video.HAVE_CURRENT_DATA) {
           try {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -282,8 +291,21 @@ export const usePoseDetection = () => {
         }
 
         updateFPS(currentTime);
-        // Use the official FPS state (updated every 1 second) for pose data
-        runInference(video, canvas, ctx, fps);
+        
+        // Run inference and wait for it to complete (especially important for MoveNet)
+        // This ensures pose overlay matches the current video frame, eliminating lag
+        try {
+          await runInference(video, canvas, ctx, fps);
+        } catch (err) {
+          console.error('Error in inference:', err);
+        }
+        
+        // Draw pose with detected landmarks (now synchronized with video frame)
+        const landmarks = lastLandmarksRef.current;
+        if (landmarks && landmarks.length > 0) {
+          drawPoseForModel(landmarks, canvas, ctx, currentModelType);
+        }
+        
         animationFrameRef.current = requestAnimationFrame(processFrame);
       };
 
@@ -335,6 +357,8 @@ export const usePoseDetection = () => {
     orientations,
     startInferenceLoop,
     stopInferenceLoop,
+    modelType: currentModelType,
+    modelMetadata: modelMetadataRef.current,
   };
 };
 

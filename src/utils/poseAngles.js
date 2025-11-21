@@ -1,5 +1,26 @@
-// BlazePose landmark indices
-export const LANDMARK_INDICES = {
+// MoveNet Lightning landmark indices (17 keypoints)
+export const MOVENET_LANDMARK_INDICES = {
+  NOSE: 0,
+  LEFT_EYE: 1,
+  RIGHT_EYE: 2,
+  LEFT_EAR: 3,
+  RIGHT_EAR: 4,
+  LEFT_SHOULDER: 5,
+  RIGHT_SHOULDER: 6,
+  LEFT_ELBOW: 7,
+  RIGHT_ELBOW: 8,
+  LEFT_WRIST: 9,
+  RIGHT_WRIST: 10,
+  LEFT_HIP: 11,
+  RIGHT_HIP: 12,
+  LEFT_KNEE: 13,
+  RIGHT_KNEE: 14,
+  LEFT_ANKLE: 15,
+  RIGHT_ANKLE: 16,
+};
+
+// BlazePose landmark indices (33 keypoints)
+export const BLAZEPOSE_LANDMARK_INDICES = {
   // Face
   NOSE: 0,
   LEFT_EYE_INNER: 1,
@@ -39,6 +60,9 @@ export const LANDMARK_INDICES = {
   LEFT_FOOT_INDEX: 31,
   RIGHT_FOOT_INDEX: 32,
 };
+
+// Default to BlazePose for backward compatibility
+export const LANDMARK_INDICES = BLAZEPOSE_LANDMARK_INDICES;
 
 /**
  * Calculate 3D distance between two points
@@ -87,49 +111,48 @@ export const isLandmarkVisible = (landmark, minVisibility = 0.3) => {
  * @returns {number|null} Angle in degrees (0-180) or null if invalid
  */
 export const calculateAngle = (p1, p2, p3, minDistance = 0.03) => {
-  // Check visibility
+  // Check visibility - early exit for better performance
   if (!isLandmarkVisible(p1) || !isLandmarkVisible(p2) || !isLandmarkVisible(p3)) {
     return null;
   }
   
-  // Check minimum distances to avoid unstable calculations
-  const dist12 = distance2D(p1, p2);
-  const dist23 = distance2D(p2, p3);
+  // Calculate vectors and distances in one pass for better performance
+  const dx1 = p1.x - p2.x;
+  const dy1 = p1.y - p2.y;
+  const dz1 = (p1.z || 0) - (p2.z || 0);
   
-  if (dist12 < minDistance || dist23 < minDistance) {
+  const dx2 = p3.x - p2.x;
+  const dy2 = p3.y - p2.y;
+  const dz2 = (p3.z || 0) - (p2.z || 0);
+  
+  // Check minimum distances using squared distances (avoid sqrt for comparison)
+  const dist12Sq = dx1 * dx1 + dy1 * dy1;
+  const dist23Sq = dx2 * dx2 + dy2 * dy2;
+  const minDistSq = minDistance * minDistance;
+  
+  if (dist12Sq < minDistSq || dist23Sq < minDistSq) {
     return null;
   }
   
-  // Vector from p2 to p1
-  const v1 = {
-    x: p1.x - p2.x,
-    y: p1.y - p2.y,
-    z: (p1.z || 0) - (p2.z || 0)
-  };
-  
-  // Vector from p2 to p3
-  const v2 = {
-    x: p3.x - p2.x,
-    y: p3.y - p2.y,
-    z: (p3.z || 0) - (p2.z || 0)
-  };
-  
   // Calculate dot product
-  const dotProduct = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+  const dotProduct = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   
-  // Calculate magnitudes
-  const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
-  const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
+  // Calculate magnitudes (only when needed)
+  const mag1Sq = dist12Sq + dz1 * dz1;
+  const mag2Sq = dist23Sq + dz2 * dz2;
   
   // Avoid division by zero
-  if (mag1 === 0 || mag2 === 0) {
+  if (mag1Sq === 0 || mag2Sq === 0) {
     return null;
   }
   
   // Calculate angle in radians, then convert to degrees
+  const mag1 = Math.sqrt(mag1Sq);
+  const mag2 = Math.sqrt(mag2Sq);
   const cosAngle = dotProduct / (mag1 * mag2);
+  
   // Clamp to [-1, 1] to avoid NaN from acos
-  const clampedCos = Math.max(-1, Math.min(1, cosAngle));
+  const clampedCos = cosAngle > 1 ? 1 : (cosAngle < -1 ? -1 : cosAngle);
   const angleRad = Math.acos(clampedCos);
   const angleDeg = (angleRad * 180) / Math.PI;
   
@@ -144,7 +167,7 @@ export const calculateAngle = (p1, p2, p3, minDistance = 0.03) => {
  * @returns {Object|null} Normalized direction vector {x, y, z, angle} or null if invalid
  */
 export const calculateSegmentOrientation = (p1, p2, minDistance = 0.03) => {
-  // Check visibility
+  // Check visibility - early exit for better performance
   if (!isLandmarkVisible(p1) || !isLandmarkVisible(p2)) {
     return null;
   }
@@ -153,18 +176,23 @@ export const calculateSegmentOrientation = (p1, p2, minDistance = 0.03) => {
   const dy = p2.y - p1.y;
   const dz = (p2.z || 0) - (p1.z || 0);
   
-  const magnitude = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  // Use squared magnitude for comparison (avoid sqrt)
+  const magnitudeSq = dx * dx + dy * dy + dz * dz;
+  const minDistSq = minDistance * minDistance;
   
   // Check minimum distance
-  if (magnitude < minDistance) {
+  if (magnitudeSq < minDistSq) {
     return null;
   }
   
+  const magnitude = Math.sqrt(magnitudeSq);
+  const invMagnitude = 1 / magnitude; // Pre-calculate inverse for division
+  
   // Normalized direction vector
   const direction = {
-    x: dx / magnitude,
-    y: dy / magnitude,
-    z: dz / magnitude,
+    x: dx * invMagnitude,
+    y: dy * invMagnitude,
+    z: dz * invMagnitude,
     magnitude: magnitude
   };
   
@@ -194,139 +222,128 @@ export const calculateSegmentOrientation = (p1, p2, minDistance = 0.03) => {
 
 /**
  * Calculate all joint angles from pose landmarks
+ * Supports both MoveNet (17 keypoints) and BlazePose (33 keypoints)
  * @param {Array} landmarks - Array of pose landmarks
  * @returns {Object} Object containing all calculated angles
  */
 export const calculateAllAngles = (landmarks) => {
-  if (!landmarks || landmarks.length < 33) {
+  if (!landmarks || (landmarks.length < 17 && landmarks.length < 33)) {
     return null;
   }
   
-  const angles = {};
+  // Detect model type based on number of landmarks
+  const isMoveNet = landmarks.length === 17;
+  const INDICES = isMoveNet ? MOVENET_LANDMARK_INDICES : BLAZEPOSE_LANDMARK_INDICES;
+  
+  // Pre-allocate object for better performance
+  const angles = {
+    leftShoulder: null,
+    leftElbow: null,
+    rightShoulder: null,
+    rightElbow: null,
+    leftHip: null,
+    leftKnee: null,
+    rightHip: null,
+    rightKnee: null,
+    torso: null
+  };
+  
+  // Cache landmark lookups for better performance
+  const leftHip = landmarks[INDICES.LEFT_HIP];
+  const leftShoulder = landmarks[INDICES.LEFT_SHOULDER];
+  const leftElbow = landmarks[INDICES.LEFT_ELBOW];
+  const leftWrist = landmarks[INDICES.LEFT_WRIST];
+  const rightHip = landmarks[INDICES.RIGHT_HIP];
+  const rightShoulder = landmarks[INDICES.RIGHT_SHOULDER];
+  const rightElbow = landmarks[INDICES.RIGHT_ELBOW];
+  const rightWrist = landmarks[INDICES.RIGHT_WRIST];
+  const leftKnee = landmarks[INDICES.LEFT_KNEE];
+  const leftAnkle = landmarks[INDICES.LEFT_ANKLE];
+  const rightKnee = landmarks[INDICES.RIGHT_KNEE];
+  const rightAnkle = landmarks[INDICES.RIGHT_ANKLE];
   
   // Left arm angles
-  angles.leftShoulder = calculateAngle(
-    landmarks[LANDMARK_INDICES.LEFT_HIP],
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_ELBOW]
-  );
-  
-  angles.leftElbow = calculateAngle(
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_ELBOW],
-    landmarks[LANDMARK_INDICES.LEFT_WRIST]
-  );
+  angles.leftShoulder = calculateAngle(leftHip, leftShoulder, leftElbow);
+  angles.leftElbow = calculateAngle(leftShoulder, leftElbow, leftWrist);
   
   // Right arm angles
-  angles.rightShoulder = calculateAngle(
-    landmarks[LANDMARK_INDICES.RIGHT_HIP],
-    landmarks[LANDMARK_INDICES.RIGHT_SHOULDER],
-    landmarks[LANDMARK_INDICES.RIGHT_ELBOW]
-  );
-  
-  angles.rightElbow = calculateAngle(
-    landmarks[LANDMARK_INDICES.RIGHT_SHOULDER],
-    landmarks[LANDMARK_INDICES.RIGHT_ELBOW],
-    landmarks[LANDMARK_INDICES.RIGHT_WRIST]
-  );
+  angles.rightShoulder = calculateAngle(rightHip, rightShoulder, rightElbow);
+  angles.rightElbow = calculateAngle(rightShoulder, rightElbow, rightWrist);
   
   // Left leg angles
-  angles.leftHip = calculateAngle(
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_HIP],
-    landmarks[LANDMARK_INDICES.LEFT_KNEE]
-  );
-  
-  angles.leftKnee = calculateAngle(
-    landmarks[LANDMARK_INDICES.LEFT_HIP],
-    landmarks[LANDMARK_INDICES.LEFT_KNEE],
-    landmarks[LANDMARK_INDICES.LEFT_ANKLE]
-  );
+  angles.leftHip = calculateAngle(leftShoulder, leftHip, leftKnee);
+  angles.leftKnee = calculateAngle(leftHip, leftKnee, leftAnkle);
   
   // Right leg angles
-  angles.rightHip = calculateAngle(
-    landmarks[LANDMARK_INDICES.RIGHT_SHOULDER],
-    landmarks[LANDMARK_INDICES.RIGHT_HIP],
-    landmarks[LANDMARK_INDICES.RIGHT_KNEE]
-  );
-  
-  angles.rightKnee = calculateAngle(
-    landmarks[LANDMARK_INDICES.RIGHT_HIP],
-    landmarks[LANDMARK_INDICES.RIGHT_KNEE],
-    landmarks[LANDMARK_INDICES.RIGHT_ANKLE]
-  );
+  angles.rightHip = calculateAngle(rightShoulder, rightHip, rightKnee);
+  angles.rightKnee = calculateAngle(rightHip, rightKnee, rightAnkle);
   
   // Torso angle (shoulder to hip)
-  angles.torso = calculateAngle(
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_HIP],
-    landmarks[LANDMARK_INDICES.RIGHT_HIP]
-  );
+  angles.torso = calculateAngle(leftShoulder, leftHip, rightHip);
   
   return angles;
 };
 
 /**
  * Calculate all segment orientations
+ * Supports both MoveNet (17 keypoints) and BlazePose (33 keypoints)
  * @param {Array} landmarks - Array of pose landmarks
  * @returns {Object} Object containing segment orientations
  */
 export const calculateAllOrientations = (landmarks) => {
-  if (!landmarks || landmarks.length < 33) {
+  if (!landmarks || (landmarks.length < 17 && landmarks.length < 33)) {
     return null;
   }
   
-  const orientations = {};
+  // Detect model type based on number of landmarks
+  const isMoveNet = landmarks.length === 17;
+  const INDICES = isMoveNet ? MOVENET_LANDMARK_INDICES : BLAZEPOSE_LANDMARK_INDICES;
+  
+  // Pre-allocate object for better performance
+  const orientations = {
+    leftUpperArm: null,
+    rightUpperArm: null,
+    leftForearm: null,
+    rightForearm: null,
+    leftThigh: null,
+    rightThigh: null,
+    leftShin: null,
+    rightShin: null,
+    torso: null
+  };
+  
+  // Cache landmark lookups for better performance
+  const leftShoulder = landmarks[INDICES.LEFT_SHOULDER];
+  const leftElbow = landmarks[INDICES.LEFT_ELBOW];
+  const leftWrist = landmarks[INDICES.LEFT_WRIST];
+  const rightShoulder = landmarks[INDICES.RIGHT_SHOULDER];
+  const rightElbow = landmarks[INDICES.RIGHT_ELBOW];
+  const rightWrist = landmarks[INDICES.RIGHT_WRIST];
+  const leftHip = landmarks[INDICES.LEFT_HIP];
+  const leftKnee = landmarks[INDICES.LEFT_KNEE];
+  const leftAnkle = landmarks[INDICES.LEFT_ANKLE];
+  const rightHip = landmarks[INDICES.RIGHT_HIP];
+  const rightKnee = landmarks[INDICES.RIGHT_KNEE];
+  const rightAnkle = landmarks[INDICES.RIGHT_ANKLE];
   
   // Upper arm segments
-  orientations.leftUpperArm = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_ELBOW]
-  );
-  
-  orientations.rightUpperArm = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.RIGHT_SHOULDER],
-    landmarks[LANDMARK_INDICES.RIGHT_ELBOW]
-  );
+  orientations.leftUpperArm = calculateSegmentOrientation(leftShoulder, leftElbow);
+  orientations.rightUpperArm = calculateSegmentOrientation(rightShoulder, rightElbow);
   
   // Forearm segments
-  orientations.leftForearm = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.LEFT_ELBOW],
-    landmarks[LANDMARK_INDICES.LEFT_WRIST]
-  );
-  
-  orientations.rightForearm = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.RIGHT_ELBOW],
-    landmarks[LANDMARK_INDICES.RIGHT_WRIST]
-  );
+  orientations.leftForearm = calculateSegmentOrientation(leftElbow, leftWrist);
+  orientations.rightForearm = calculateSegmentOrientation(rightElbow, rightWrist);
   
   // Thigh segments
-  orientations.leftThigh = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.LEFT_HIP],
-    landmarks[LANDMARK_INDICES.LEFT_KNEE]
-  );
-  
-  orientations.rightThigh = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.RIGHT_HIP],
-    landmarks[LANDMARK_INDICES.RIGHT_KNEE]
-  );
+  orientations.leftThigh = calculateSegmentOrientation(leftHip, leftKnee);
+  orientations.rightThigh = calculateSegmentOrientation(rightHip, rightKnee);
   
   // Lower leg segments
-  orientations.leftShin = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.LEFT_KNEE],
-    landmarks[LANDMARK_INDICES.LEFT_ANKLE]
-  );
-  
-  orientations.rightShin = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.RIGHT_KNEE],
-    landmarks[LANDMARK_INDICES.RIGHT_ANKLE]
-  );
+  orientations.leftShin = calculateSegmentOrientation(leftKnee, leftAnkle);
+  orientations.rightShin = calculateSegmentOrientation(rightKnee, rightAnkle);
   
   // Torso segment
-  orientations.torso = calculateSegmentOrientation(
-    landmarks[LANDMARK_INDICES.LEFT_SHOULDER],
-    landmarks[LANDMARK_INDICES.LEFT_HIP]
-  );
+  orientations.torso = calculateSegmentOrientation(leftShoulder, leftHip);
   
   return orientations;
 };
