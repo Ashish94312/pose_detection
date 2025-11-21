@@ -26,7 +26,6 @@ class BasePoseModel {
   }
 
   dispose() {
-    // Override in subclasses if needed
   }
 }
 
@@ -130,15 +129,19 @@ class BlazePoseWorkerModel extends BasePoseModel {
 class MoveNetModel extends BasePoseModel {
   async load() {
     try {
-      console.log('Loading MoveNet model from TensorFlow Hub...');
+      console.log('Loading MoveNet model from local files...');
+      console.log('Model URL:', this.config.modelUrl);
       const loadStartTime = performance.now();
       
-      // Enable model caching for faster subsequent loads
+      const isLocalPath = this.config.modelUrl.startsWith('/');
+      
       const model = await tf.loadGraphModel(this.config.modelUrl, { 
-        fromTFHub: true,
-        // Enable caching to speed up subsequent loads
+        fromTFHub: !isLocalPath,
         requestInit: {
-          cache: 'force-cache', // Use browser cache if available
+          cache: 'force-cache',
+          headers: {
+            'Accept': '*/*',
+          },
         },
       });
       
@@ -150,6 +153,11 @@ class MoveNetModel extends BasePoseModel {
       return true;
     } catch (error) {
       console.error('Error loading MoveNet model:', error);
+      console.error('Model URL:', this.config.modelUrl);
+      console.error('Error details:', error.message);
+      if (error.stack) {
+        console.error('Stack trace:', error.stack);
+      }
       throw error;
     }
   }
@@ -166,31 +174,24 @@ class MoveNetModel extends BasePoseModel {
         const imageTensor = tf.browser.fromPixels(video);
         const resized = tf.image.resizeBilinear(imageTensor, [192, 192]);
         const casted = resized.cast('int32');
-        const expanded = casted.expandDims(0); // Add batch dimension -> [1, 192, 192, 3]
+        const expanded = casted.expandDims(0);
         
-        // Run inference
-        // MoveNet outputs shape [1, 1, 17, 3] where last dim is [y, x, confidence]
         const predictions = this.model.predict(expanded);
-        const keypointsTensor = predictions.squeeze(); // Remove batch and pose dimensions -> [17, 3]
+        const keypointsTensor = predictions.squeeze();
         
-        // Synchronously get array data (faster than async array())
-        // This keeps computation in tidy scope
         return keypointsTensor.arraySync();
       });
       
-      // MoveNet outputs: [y, x, confidence] for each of 17 keypoints
-      // Check if pose score is above threshold
-      const poseScore = keypoints[0][2]; // Use nose confidence as pose score
+      const poseScore = keypoints[0][2];
       if (poseScore >= this.config.minPoseScore) {
-        // Pre-allocate array for better performance
         const landmarks = new Array(17);
         for (let i = 0; i < 17; i++) {
           const [y, x, confidence] = keypoints[i];
           landmarks[i] = {
-            x: x, // Normalized 0-1
-            y: y, // Normalized 0-1
-            z: 0, // MoveNet doesn't provide depth
-            visibility: confidence, // Use confidence as visibility
+            x: x,
+            y: y,
+            z: 0,
+            visibility: confidence,
           };
         }
         return landmarks;
@@ -204,7 +205,6 @@ class MoveNetModel extends BasePoseModel {
 
   dispose() {
     if (this.model) {
-      // TensorFlow.js models don't need explicit disposal, but we can clean up
       this.model = null;
     }
   }
@@ -220,7 +220,6 @@ class MoveNetModel extends BasePoseModel {
 export const createPoseModel = (modelType, config, useWorker = true) => {
   switch (modelType.toLowerCase()) {
     case 'blazepose':
-      // Use worker by default for BlazePose to avoid blocking main thread
       return useWorker ? new BlazePoseWorkerModel(config) : new BlazePoseModel(config);
     case 'movenet':
     case 'movenet-lightning':

@@ -116,7 +116,7 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
         const useWorker = currentModelType === 'blazepose' && (config.useWorker !== false);
         
         if (currentModelType === 'movenet') {
-          setLoadingProgress('Loading MoveNet from TensorFlow Hub...');
+          setLoadingProgress('Loading MoveNet model...');
         } else {
           setLoadingProgress('Loading BlazePose model...');
         }

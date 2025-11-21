@@ -29,7 +29,7 @@ export const BLAZEPOSE_CONFIG = {
 // MoveNet Lightning Configuration (TensorFlow.js)
 export const MOVENET_CONFIG = {
   modelType: 'movenet',
-  modelUrl: 'https://tfhub.dev/google/tfjs-model/movenet/singlepose/lightning/4', // MoveNet Lightning v4
+  modelUrl: '/models/movenet/model.json', // MoveNet Lightning v4 - local model
   wasmPath: '/wasm', // Not used by MoveNet, but kept for consistency
   delegate: 'GPU', // Not used by MoveNet, but kept for consistency
   runningMode: 'VIDEO', // Not used by MoveNet, but kept for consistency
