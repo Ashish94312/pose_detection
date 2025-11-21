@@ -101,9 +101,9 @@ class JumpDetector {
     
     // Warm-up period to prevent false positives when person enters frame
     this.warmupFrames = 0; // Count frames with both ankles visible
-    this.minWarmupFrames = 30; // Need at least 30 frames (0.5s at 60fps) before allowing jumps
+    this.minWarmupFrames = 15; // Need at least 15 frames (~0.25s at 60fps) before allowing jumps (reduced from 30)
     this.bothAnklesVisibleHistory = []; // Track if both ankles were visible in previous frames
-    this.minStableBaselineFrames = 10; // Need stable baseline for this many frames before allowing jumps
+    this.minStableBaselineFrames = 5; // Need stable baseline for this many frames before allowing jumps (reduced from 10)
     
     // Dynamic scale calculation
     this.personHeightNormalized = null; // Person's height in normalized coordinates
@@ -244,6 +244,7 @@ class JumpDetector {
   /**
    * Get ankle positions (left and right)
    * Returns average Y position if both visible, or single if only one visible
+   * Uses adaptive visibility thresholds for MoveNet (lower) and BlazePose (higher)
    */
   getAnkleY(joints) {
     if (!joints) return null;
@@ -253,11 +254,17 @@ class JumpDetector {
     
     if (!leftAnkle || !rightAnkle) return null;
     
-    // Check visibility
-    const leftVisible = leftAnkle.visible && 
-                       (leftAnkle.visibility === undefined || leftAnkle.visibility >= 0.6);
-    const rightVisible = rightAnkle.visible && 
-                        (rightAnkle.visibility === undefined || rightAnkle.visibility >= 0.6);
+    // Adaptive visibility threshold: MoveNet has lower confidence scores (< 0.7), BlazePose has higher (> 0.7)
+    const leftVisibility = leftAnkle.visibility !== undefined ? leftAnkle.visibility : 1.0;
+    const rightVisibility = rightAnkle.visibility !== undefined ? rightAnkle.visibility : 1.0;
+    
+    // Determine if we're using MoveNet by checking visibility scores
+    const isLikelyMoveNet = leftVisibility < 0.7 && rightVisibility < 0.7;
+    const visibilityThreshold = isLikelyMoveNet ? 0.25 : 0.5; // Lower threshold for MoveNet, higher for BlazePose
+    
+    // Check visibility with adaptive threshold
+    const leftVisible = leftAnkle.visible && leftVisibility >= visibilityThreshold;
+    const rightVisible = rightAnkle.visible && rightVisibility >= visibilityThreshold;
     
     if (leftVisible && rightVisible) {
       return {
@@ -356,7 +363,8 @@ class JumpDetector {
   updateBaselineAnkleHeight(joints, verticalVelocity) {
     const ankleData = this.getAnkleY(joints);
     
-    // Track warm-up: count consecutive frames with both ankles visible
+    // Track warm-up: count frames with both ankles visible
+    // Simplified logic: count total frames with both ankles visible (not strictly consecutive)
     if (ankleData && ankleData.bothVisible) {
       this.bothAnklesVisibleHistory.push(true);
       // Keep only recent history (last 60 frames = ~1 second at 60fps)
@@ -364,33 +372,36 @@ class JumpDetector {
         this.bothAnklesVisibleHistory.shift();
       }
       
-      // Count warm-up frames (consecutive frames with both ankles visible)
-      // Reset if we lose visibility
-      if (this.bothAnklesVisibleHistory.length >= this.minWarmupFrames) {
-        // Check if we have enough consecutive visible frames
-        const recentVisible = this.bothAnklesVisibleHistory.slice(-this.minWarmupFrames);
-        if (recentVisible.every(v => v === true)) {
-          this.warmupFrames = this.minWarmupFrames;
-        } else {
-          // Reset warm-up if we had gaps
-          this.warmupFrames = recentVisible.filter(v => v === true).length;
-        }
+      // Count warm-up frames: need at least minWarmupFrames with both ankles visible in recent history
+      // More lenient: count total visible frames in recent history, not strictly consecutive
+      const recentHistory = this.bothAnklesVisibleHistory.slice(-this.minWarmupFrames * 2); // Check last 2x period
+      const visibleCount = recentHistory.filter(v => v === true).length;
+      
+      // Warm-up complete if we have enough visible frames in recent history
+      if (visibleCount >= this.minWarmupFrames) {
+        this.warmupFrames = this.minWarmupFrames;
       } else {
-        this.warmupFrames = this.bothAnklesVisibleHistory.length;
+        this.warmupFrames = visibleCount;
       }
     } else {
-      // Reset warm-up if both ankles not visible
+      // Track when both ankles are not visible
       this.bothAnklesVisibleHistory.push(false);
       if (this.bothAnklesVisibleHistory.length > 60) {
         this.bothAnklesVisibleHistory.shift();
       }
-      // Reset warm-up counter if we lose visibility
-      if (this.bothAnklesVisibleHistory.slice(-5).every(v => v === false)) {
+      
+      // Only reset warm-up if we've lost visibility for many consecutive frames
+      // This prevents resetting on brief occlusions
+      const recentHistory = this.bothAnklesVisibleHistory.slice(-10);
+      if (recentHistory.filter(v => v === false).length >= 8) {
+        // Lost visibility for most of recent frames - reset warm-up
         this.warmupFrames = 0;
       }
     }
     
-    if (!ankleData || !ankleData.bothVisible) {
+    // Update baseline even if only one ankle is visible (for faster initialization)
+    // But prefer both ankles visible for accuracy
+    if (!ankleData) {
       return;
     }
     
@@ -399,20 +410,27 @@ class JumpDetector {
     const noiseThreshold = this.config.noiseThresholdNormalized * (this.config.normalizedToMeters || 1.0);
     
     if (absVelocity < noiseThreshold) {
-      this.ankleYHistory.push(ankleData.average);
-      if (this.ankleYHistory.length > this.maxAnkleHistoryLength) {
-        this.ankleYHistory.shift();
-      }
+      // Use average if both visible, otherwise use single ankle if available
+      const ankleYToUse = ankleData.bothVisible ? ankleData.average : 
+                          (ankleData.left !== null ? ankleData.left : 
+                           (ankleData.right !== null ? ankleData.right : null));
       
-      // Calculate baseline as average of recent stationary positions
-      // Need at least minStableBaselineFrames for stable baseline
-      if (this.ankleYHistory.length >= this.minStableBaselineFrames) {
-        const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
-        this.baselineAnkleY = sum / this.ankleYHistory.length;
-      } else if (this.baselineAnkleY === null && this.ankleYHistory.length >= 5) {
-        // Initialize with average of available history (need at least 5 frames)
-        const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
-        this.baselineAnkleY = sum / this.ankleYHistory.length;
+      if (ankleYToUse !== null) {
+        this.ankleYHistory.push(ankleYToUse);
+        if (this.ankleYHistory.length > this.maxAnkleHistoryLength) {
+          this.ankleYHistory.shift();
+        }
+        
+        // Calculate baseline as average of recent stationary positions
+        // Need at least minStableBaselineFrames for stable baseline
+        if (this.ankleYHistory.length >= this.minStableBaselineFrames) {
+          const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
+          this.baselineAnkleY = sum / this.ankleYHistory.length;
+        } else if (this.baselineAnkleY === null && this.ankleYHistory.length >= 3) {
+          // Initialize with average of available history (need at least 3 frames, reduced from 5)
+          const sum = this.ankleYHistory.reduce((a, b) => a + b, 0);
+          this.baselineAnkleY = sum / this.ankleYHistory.length;
+        }
       }
     }
   }
