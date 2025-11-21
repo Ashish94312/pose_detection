@@ -10,6 +10,8 @@ import ResolutionSelector from './components/ResolutionSelector';
 import Info from './components/Info';
 import { JumpWidgets } from './jumpDetection';
 import { DEFAULT_MODEL, DEFAULT_RESOLUTION } from './config/poseConfig';
+import logger from './utils/logger';
+import PerformanceProfiler from './components/PerformanceProfiler';
 import './App.css';
 
 function App() {
@@ -160,8 +162,12 @@ function App() {
                 <AngleDisplay angles={angles} orientations={orientations} />
               </div>
 
+              <div className="data-card">           
+                <JumpWidgets /> 
+              </div>
+
               <div className="data-card">
-                <JumpWidgets />
+                <PerformanceProfiler />
               </div>
 
               <Info />

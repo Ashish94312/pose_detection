@@ -8,6 +8,7 @@ import { drawPose } from '../utils/poseDrawing';
 import { calculateAllAngles, calculateAllOrientations } from '../utils/poseAngles';
 import { createPoseData } from '../utils/poseSchema';
 import { posePubSub } from '../utils/pubsub';
+import { performanceProfiler } from '../utils/performanceProfiler';
 
 /**
  * BlazePose-specific inference handler
@@ -33,11 +34,14 @@ export const createBlazePoseHandler = (
     }
 
     let rawLandmarks = null;
+    let timerId = null;
 
     if (shouldRunDetection) {
+      timerId = performanceProfiler.start('modelHandlers.BlazePose.detect');
       try {
         // BlazePose detection is synchronous (MediaPipe)
         rawLandmarks = await poseModelRef.current.detect(video, performance.now());
+        if (timerId) performanceProfiler.end(timerId, { landmarksCount: rawLandmarks?.length || 0 });
         
         if (rawLandmarks && rawLandmarks.length > 0) {
           lastLandmarksRef.current = rawLandmarks;
@@ -45,6 +49,7 @@ export const createBlazePoseHandler = (
           lastLandmarksRef.current = null;
         }
       } catch (err) {
+        if (timerId) performanceProfiler.end(timerId, { error: err.message });
         console.error('Error running BlazePose detection:', err);
         lastLandmarksRef.current = null;
         rawLandmarks = null;
@@ -97,12 +102,15 @@ export const createMoveNetHandler = (
     }
 
     let rawLandmarks = lastLandmarksRef.current;
+    let timerId = null;
 
     if (shouldRunDetection) {
+      timerId = performanceProfiler.start('modelHandlers.MoveNet.detect');
       // Wait for detection to complete to ensure pose overlay matches current video frame
       // This eliminates lag between video and pose overlay
       try {
         const detectedLandmarks = await poseModelRef.current.detect(video, performance.now());
+        if (timerId) performanceProfiler.end(timerId, { landmarksCount: detectedLandmarks?.length || 0 });
         
         if (!isRunningRef.current) return; // Don't update if stopped
         
@@ -114,6 +122,7 @@ export const createMoveNetHandler = (
           rawLandmarks = null;
         }
       } catch (err) {
+        if (timerId) performanceProfiler.end(timerId, { error: err.message });
         console.error('Error running MoveNet detection:', err);
         if (isRunningRef.current) {
           lastLandmarksRef.current = null;
@@ -159,7 +168,10 @@ const processLandmarks = (
   canvas,
   ctx
 ) => {
+  const timerId = performanceProfiler.start('modelHandlers.processLandmarks', { shouldRunDetection });
+  
   if (!rawLandmarks || rawLandmarks.length === 0) {
+    if (timerId) performanceProfiler.end(timerId, { skipped: true });
     return null;
   }
 
@@ -233,6 +245,7 @@ const processLandmarks = (
   }
 
   // Return landmarks for drawing (drawing happens separately in processFrame)
+  if (timerId) performanceProfiler.end(timerId, { hasAngles: !!smoothedAngles, hasOrientations: !!smoothedOrientations });
   return landmarksForDrawing;
 };
 

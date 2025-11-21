@@ -3,6 +3,7 @@ import { SMOOTHING_CONFIG, PERFORMANCE_CONFIG, getModelConfig, DEFAULT_MODEL } f
 import { createPoseModel, getModelMetadata } from '../models/poseModelFactory';
 import { AngleSmoother, LandmarkSmoother } from '../utils/smoothing';
 import { createBlazePoseHandler, createMoveNetHandler, drawPoseForModel } from './modelHandlers';
+import { performanceProfiler } from '../utils/performanceProfiler';
 
 /**
  * Custom hook for multi-model pose detection (BlazePose & MoveNet)
@@ -184,7 +185,10 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
 
   // Run inference on video frame - uses model-specific handler
   const runInference = useCallback(async (video, canvas, ctx, currentFps) => {
+    const timerId = performanceProfiler.start('usePoseDetection.runInference', { modelType: currentModelType });
+    
     if (!poseModelRef.current || !video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      if (timerId) performanceProfiler.end(timerId, { skipped: true, reason: 'notReady' });
       return;
     }
 
@@ -234,6 +238,10 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
           isRunningRef
         )(video, canvas, ctx, currentFps);
       }
+      
+      if (timerId) performanceProfiler.end(timerId, { shouldRunDetection });
+    } else {
+      if (timerId) performanceProfiler.end(timerId, { skipped: true, reason: 'sameFrame' });
     }
   }, [currentModelType]);
 
@@ -276,8 +284,11 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
       lastAnglesRef.current = null;
       lastOrientationsRef.current = null;
 
-      const processFrame = async (currentTime) => {
+        const processFrame = async (currentTime) => {
+        const frameTimerId = performanceProfiler.start('usePoseDetection.processFrame');
+        
         if (!isRunningRef.current) {
+          if (frameTimerId) performanceProfiler.end(frameTimerId, { skipped: true, reason: 'notRunning' });
           return;
         }
 
@@ -303,9 +314,12 @@ export const usePoseDetection = (modelType = DEFAULT_MODEL) => {
         // Draw pose with detected landmarks (now synchronized with video frame)
         const landmarks = lastLandmarksRef.current;
         if (landmarks && landmarks.length > 0) {
+          const drawTimerId = performanceProfiler.start('usePoseDetection.drawPose');
           drawPoseForModel(landmarks, canvas, ctx, currentModelType);
+          if (drawTimerId) performanceProfiler.end(drawTimerId, { landmarksCount: landmarks.length });
         }
         
+        if (frameTimerId) performanceProfiler.end(frameTimerId);
         animationFrameRef.current = requestAnimationFrame(processFrame);
       };
 

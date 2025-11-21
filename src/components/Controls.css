@@ -67,3 +67,12 @@
   background: linear-gradient(135deg, #f87171 0%, var(--danger) 100%);
   box-shadow: var(--shadow-lg), 0 0 20px rgba(239, 68, 68, 0.4);
 }
+
+.control-button:not(:disabled).log-button {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
+.control-button:not(:disabled).log-button:hover {
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  box-shadow: var(--shadow-lg), 0 0 20px rgba(16, 185, 129, 0.4);
+}

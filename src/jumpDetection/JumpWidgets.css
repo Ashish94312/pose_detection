@@ -175,6 +175,26 @@
   line-height: 1.2;
 }
 
+.jump-count-value {
+  transition: all 0.3s ease;
+  animation: jumpCountPulse 0.6s ease-out;
+}
+
+@keyframes jumpCountPulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
 .widget-subtitle {
   font-size: 12px;
   color: var(--text-tertiary);

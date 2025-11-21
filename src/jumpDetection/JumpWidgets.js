@@ -3,8 +3,10 @@
  * Live widgets for displaying jump detection data
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { jumpDetector } from './jumpDetector';
+import { performanceProfiler } from '../utils/performanceProfiler';
 import './JumpWidgets.css';
 
 /**
@@ -24,66 +26,156 @@ const JumpWidgets = () => {
   const [currentAirtime, setCurrentAirtime] = useState(0);
   const [mass, setMass] = useState(jumpDetector.getMass());
   const [showMassInput, setShowMassInput] = useState(false);
+  
+  // Use refs to track previous values and avoid unnecessary updates
+  const prevJumpCountRef = useRef(0);
+  const prevLastLandingRef = useRef(null);
+  const jumpStateRef = useRef(jumpState);
+  const currentAirtimeRef = useRef(currentAirtime);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    jumpStateRef.current = jumpState;
+  }, [jumpState]);
+  
+  useEffect(() => {
+    currentAirtimeRef.current = currentAirtime;
+  }, [currentAirtime]);
 
   useEffect(() => {
     // Helper function to update state from jumpDetector
-    const updateStateFromDetector = () => {
+    // Use flushSync for immediate synchronous updates (bypasses React batching)
+    const updateStateFromDetector = (forceSync = false) => {
       const state = jumpDetector.getState();
-      // Always create a new object to ensure React detects the change
-      // Use functional update to get the latest state
-      setJumpState(prevState => {
-        const newState = {
-          fsmState: state.fsmState,
-          isJumping: state.isJumping,
-          isInAir: state.isInAir,
-          isLanding: state.isLanding,
-          jumpCount: state.jumpCount,
-        };
-        // Always return new state object - React will handle comparison
-        return newState;
-      });
-      setCurrentAirtime(state.currentAirtime || 0);
+      const newState = {
+        fsmState: state.fsmState,
+        isJumping: state.isJumping,
+        isInAir: state.isInAir,
+        isLanding: state.isLanding,
+        jumpCount: state.jumpCount,
+      };
+      
+      // Only update if state actually changed (optimization)
+      const currentState = jumpStateRef.current;
+      const stateChanged = 
+        newState.fsmState !== currentState.fsmState ||
+        newState.isJumping !== currentState.isJumping ||
+        newState.isInAir !== currentState.isInAir ||
+        newState.isLanding !== currentState.isLanding ||
+        newState.jumpCount !== currentState.jumpCount;
+      
+      const newAirtime = state.currentAirtime || 0;
+      const airtimeChanged = newAirtime !== currentAirtimeRef.current;
+      
+      if (stateChanged || airtimeChanged) {
+        if (forceSync) {
+          // Force synchronous update for critical state changes
+          flushSync(() => {
+            if (stateChanged) setJumpState(newState);
+            if (airtimeChanged) setCurrentAirtime(newAirtime);
+          });
+        } else {
+          // Normal update for non-critical changes
+          if (stateChanged) setJumpState(newState);
+          if (airtimeChanged) setCurrentAirtime(newAirtime);
+        }
+      }
     };
 
-    // Set up callbacks
+    // Set up callbacks with immediate synchronous updates
     jumpDetector.onJumpDetected = (data) => {
-      setLastJump(data);
-      updateStateFromDetector();
+      const timerId = performanceProfiler.start('JumpWidgets.onJumpDetected', { jumpNumber: data.jumpNumber });
+      
+      // Force immediate update for jump detection
+      flushSync(() => {
+        setLastJump(data);
+        updateStateFromDetector(true);
+      });
+      
+      if (timerId) performanceProfiler.end(timerId, { jumpNumber: data.jumpNumber });
     };
 
     jumpDetector.onLandingDetected = (data) => {
+      const callbackStartTime = performance.now();
+      const timerId = performanceProfiler.start('JumpWidgets.onLandingDetected', { 
+        jumpNumber: data.jumpNumber,
+        isValid: data.isValid 
+      });
+      
+      // Check if this is actually a new landing (avoid duplicate updates)
+      const isNewLanding = !prevLastLandingRef.current || 
+                          prevLastLandingRef.current.timestamp !== data.timestamp;
+      
+      if (!isNewLanding) {
+        if (timerId) performanceProfiler.end(timerId, { skipped: true, reason: 'duplicate' });
+        return; // Skip duplicate landing events
+      }
+      
       console.log('[JumpWidgets] onLandingDetected callback fired', {
         jumpNumber: data.jumpNumber,
         isValid: data.isValid,
         jumpHeight: data.jumpHeight,
+        jumpCount: data.jumpNumber,
+        callbackTime: callbackStartTime,
       });
-      setLastLanding(data);
-      // Immediately update state when landing is detected
-      // The jumpCount has already been incremented in transitionToGrounded if valid
-      // Force update by calling updateStateFromDetector
-      updateStateFromDetector();
-      // Also force an immediate update after a short delay to ensure React processes it
-      setTimeout(() => {
-        const currentState = jumpDetector.getState();
-        console.log('[JumpWidgets] State after landing:', {
-          jumpCount: currentState.jumpCount,
-        });
-        setJumpState(currentState);
-      }, 10);
+      
+      // Get latest state from detector
+      const state = jumpDetector.getState();
+      const newJumpState = {
+        fsmState: state.fsmState,
+        isJumping: state.isJumping,
+        isInAir: state.isInAir,
+        isLanding: state.isLanding,
+        jumpCount: state.jumpCount,
+      };
+      
+      // Force immediate synchronous update for landing (critical UI change)
+      // This bypasses React's automatic batching and updates immediately
+      flushSync(() => {
+        setLastLanding(data);
+        setJumpState(newJumpState);
+        setCurrentAirtime(state.currentAirtime || 0);
+      });
+      
+      // Update refs to track what we've processed
+      prevLastLandingRef.current = data;
+      prevJumpCountRef.current = state.jumpCount;
+      
+      const callbackEndTime = performance.now();
+      const uiUpdateTime = callbackEndTime - callbackStartTime;
+      
+      if (timerId) performanceProfiler.end(timerId, { 
+        jumpNumber: data.jumpNumber,
+        airtime: data.airTime,
+        uiUpdateTime: uiUpdateTime.toFixed(2)
+      });
+      
+      console.log('⚡ UI Update Time', {
+        'UI Update Execution Time': `${uiUpdateTime.toFixed(2)} ms`,
+        'Jump Number': data.jumpNumber,
+        'Airtime': data.airTime,
+        'Calculated Airtime': data.airTime,
+        'Execution Time Difference': data.executionTimeMs 
+          ? `${(data.executionTimeMs - data.airTime).toFixed(2)} ms` 
+          : 'N/A',
+      });
     };
 
     jumpDetector.onForceCalculated = (data) => {
+      const timerId = performanceProfiler.start('JumpWidgets.onForceCalculated');
+      // Force updates can be async (non-critical)
       setForceData(data);
+      if (timerId) performanceProfiler.end(timerId);
     };
 
     // Subscribe to pose data
     jumpDetector.subscribe();
 
     // Update state periodically to catch any missed updates
-    // This ensures the UI stays in sync even if callbacks miss an update
+    // Reduced interval to 16ms (~60fps) for smoother updates
     const interval = setInterval(() => {
-      updateStateFromDetector();
-    }, 100);
+      updateStateFromDetector(false);
+    }, 16); // ~60fps update rate
 
     return () => {
       clearInterval(interval);
@@ -146,6 +238,15 @@ const JumpWidgets = () => {
  * Status Widget - Shows current jump state
  */
 const StatusWidget = ({ state, currentAirtime }) => {
+  const [jumpCountKey, setJumpCountKey] = useState(0);
+  
+  // Track jump count changes and trigger animation
+  useEffect(() => {
+    if (state.jumpCount > 0) {
+      setJumpCountKey(prev => prev + 1);
+    }
+  }, [state.jumpCount]);
+
   const getStatusClass = () => {
     if (state.isLanding) return 'status-landing';
     if (state.isInAir) return 'status-in-air';
@@ -171,7 +272,12 @@ const StatusWidget = ({ state, currentAirtime }) => {
       <div className={`status-indicator ${getStatusClass()}`}>
         {getStatusText()}
       </div>
-      <div className="widget-value">Jumps: {state.jumpCount}</div>
+      <div 
+        key={jumpCountKey}
+        className="widget-value jump-count-value"
+      >
+        Jumps: {state.jumpCount}
+      </div>
       {(state.isInAir || state.isJumping) && currentAirtime > 0 && (
         <div className="widget-subtitle">
           <div>Airtime: {formatAirtime(currentAirtime)}</div>
@@ -266,7 +372,14 @@ const JumpStatsWidget = ({ lastJump, lastLanding }) => {
         </div>
         <div className="stat-row highlight-stat">
           <span className="stat-label">Height:</span>
-          <span className="stat-value">{lastLanding && lastLanding.jumpHeight !== undefined && lastLanding.jumpHeight !== null ? `${(lastLanding.jumpHeight * 100).toFixed(1)} cm` : '—'}</span>
+          <span className="stat-value">
+            {lastLanding && lastLanding.jumpHeight !== undefined && lastLanding.jumpHeight !== null 
+              ? `${(lastLanding.jumpHeight * 100).toFixed(1)} cm` 
+              : '—'}
+            {lastLanding && lastLanding.isValid === false && (
+              <span style={{ fontSize: '10px', color: 'var(--warning)', marginLeft: '4px' }}>(invalid)</span>
+            )}
+          </span>
         </div>
         <div className="stat-row highlight-stat">
           <span className="stat-label">Landing Time:</span>
@@ -276,7 +389,14 @@ const JumpStatsWidget = ({ lastJump, lastLanding }) => {
           <>
             <div className="stat-row">
               <span className="stat-label">Jump #:</span>
-              <span className="stat-value">{lastLanding.jumpNumber}</span>
+              <span className="stat-value">
+                {lastLanding.jumpNumber !== undefined && lastLanding.jumpNumber !== null 
+                  ? lastLanding.jumpNumber 
+                  : '—'}
+                {lastLanding.isValid === false && (
+                  <span style={{ fontSize: '10px', color: 'var(--warning)', marginLeft: '4px' }}>(not counted)</span>
+                )}
+              </span>
             </div>
             <div className="stat-row">
               <span className="stat-label">Takeoff:</span>
